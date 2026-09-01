@@ -233,25 +233,33 @@ function PlatformShell({ controller, t, remote, useWorkspaces }: Pick<PlatformSu
 
   const loadAccount = async (): Promise<void> => {
     setGate('loading'); setMessage(undefined)
-    const result = await remote.teamSkills.account()
-    if (!result.ok) { showError(result.error.message); return }
-    await consumeAccount(result.value)
+    try {
+      const result = await remote.teamSkills.account()
+      if (!result.ok) { showError(result.error.message); return }
+      await consumeAccount(result.value)
+    } catch (error) {
+      showError(remoteFailureMessage(error))
+    }
   }
 
   const loadAccessSummary = async (userId = account?.user.userId): Promise<void> => {
     setGate('loading'); setProjectId(undefined); setProjectAssets(undefined); setDetailProject(undefined)
-    const [projectsResult, accessResult] = await Promise.all([remote.teamSkills.projects(), remote.teamSkills.accessSummary()])
-    if (!projectsResult.ok) { showError(projectsResult.error.message); return }
-    if (isHostFailure(projectsResult.value) || isSignedOut(projectsResult.value)) { setGate('signed-out'); return }
-    if (!accessResult.ok) { showError(accessResult.error.message); return }
-    const accessValue = accessResult.value
-    if (isHostFailure(accessValue) || isSignedOut(accessValue) || !isAccessSummary(accessValue)) { setGate('signed-out'); return }
-    const projects = projectsResult.value.filter(item => item.status === 'active')
-    const nextAccess = { ...accessValue, projects }
-    setAccess(nextAccess); setServiceProjects(projects); setOrganizations(accessValue.organizations); setOrganizationFilterId(undefined); setGate('ready')
-    const stored = readStoredProjectId(currentStorageKey(userId))
-    if (stored !== undefined && projects.some(item => item.projectId === stored)) await loadProjectDetail(stored, true, userId)
-    else if (stored !== undefined) clearStoredProjectId(currentStorageKey(userId))
+    try {
+      const [projectsResult, accessResult] = await Promise.all([remote.teamSkills.projects(), remote.teamSkills.accessSummary()])
+      if (!projectsResult.ok) { showError(projectsResult.error.message); return }
+      if (isHostFailure(projectsResult.value) || isSignedOut(projectsResult.value)) { setGate('signed-out'); return }
+      if (!accessResult.ok) { showError(accessResult.error.message); return }
+      const accessValue = accessResult.value
+      if (isHostFailure(accessValue) || isSignedOut(accessValue) || !isAccessSummary(accessValue)) { setGate('signed-out'); return }
+      const projects = projectsResult.value.filter(item => item.status === 'active')
+      const nextAccess = { ...accessValue, projects }
+      setAccess(nextAccess); setServiceProjects(projects); setOrganizations(accessValue.organizations); setOrganizationFilterId(undefined); setGate('ready')
+      const stored = readStoredProjectId(currentStorageKey(userId))
+      if (stored !== undefined && projects.some(item => item.projectId === stored)) await loadProjectDetail(stored, true, userId)
+      else if (stored !== undefined) clearStoredProjectId(currentStorageKey(userId))
+    } catch (error) {
+      showError(remoteFailureMessage(error))
+    }
   }
 
   const projectRequest = useRef(0)
@@ -652,6 +660,10 @@ function isSignedOut(value: unknown): value is { readonly status: 'signed-out' }
 
 function hostFailureMessage(value: { readonly status: 'not-ready'; readonly missing: readonly string[] } | { readonly status: 'failed'; readonly code: string; readonly message: string }): string {
   return value.status === 'not-ready' ? `服务端未就绪：${value.missing.join('、')}` : value.message
+}
+
+function remoteFailureMessage(error: unknown): string {
+  return error instanceof Error && error.message.length > 0 ? error.message : '无法读取服务端授权，请稍后重试。'
 }
 
 function isAccessSummary(value: unknown): value is TeamSkillAccessSummary {

@@ -126,6 +126,17 @@ describe('AI Coding platform demo', () => {
     expect(screen.queryByRole('heading', { name: '选择组织' })).toBeNull()
   })
 
+  it('shows an explicit service error when access loading rejects', async () => {
+    const remote = demoRemote()
+    remote.teamSkills.projects = vi.fn(async () => { throw new Error('项目访问接口未装配') })
+    const controller = new PlatformDemoController()
+    controller.open()
+    mountSurface(controller, remote)
+
+    expect(await screen.findByRole('heading', { name: '账号服务暂不可用' })).toBeTruthy()
+    expect(screen.getByText('项目访问接口未装配')).toBeTruthy()
+  })
+
   it('opens from the sidebar entry and closes from the overlay', () => {
     const controller = new PlatformDemoController()
     const onOpen = () =>{  controller.open(); }
