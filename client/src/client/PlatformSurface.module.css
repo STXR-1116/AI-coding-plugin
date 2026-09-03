@@ -1978,6 +1978,20 @@
   font-size: 11px;
 }
 
+.surfaceNotice {
+  position: fixed;
+  z-index: 2;
+  top: 82px;
+  right: 24px;
+  max-width: min(420px, calc(100% - 48px));
+  padding: 9px 12px;
+  border: 1px solid rgba(214, 129, 129, 0.45);
+  border-radius: 5px;
+  background: #2b2021;
+  color: #f0b5b5;
+  font-size: 12px;
+}
+
 .gateState {
   display: flex;
   width: min(520px, calc(100% - 48px));

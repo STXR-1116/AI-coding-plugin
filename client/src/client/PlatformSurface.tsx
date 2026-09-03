@@ -12,6 +12,9 @@ import type {
   TeamSkillOrganization,
   TeamSkillProject,
   TeamSkillProjectAsset,
+  TeamSkillKnowledgeBaseSummary,
+  TeamSkillKnowledgeSearchResponse,
+  TeamSkillKnowledgePreview,
 } from '@deepseek-ai/dsh-api-remotes/client'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import {
@@ -68,16 +71,6 @@ interface Project {
   revision: number
 }
 
-interface KnowledgeItem {
-  id: string
-  title: string
-  type: string
-  source: string
-  updated: string
-  excerpt: string
-  status: '已索引' | '索引中'
-}
-
 interface MemoryItem {
   id: string
   title: string
@@ -111,13 +104,6 @@ const NAV_ITEMS: readonly NavItem[] = [
   { id: 'memory', label: '记忆库', hint: '可复用的团队经验', icon: IconGoalOutline16 },
   { id: 'collector', label: '数据采集', hint: 'AI Coding 使用指标', icon: IconDataOutline16 },
   { id: 'agent-config', label: 'Agent 配置', hint: '云端 Agent 参数', icon: IconAgentPresetOutline16 },
-]
-
-const KNOWLEDGE: readonly KnowledgeItem[] = [
-  { id: 'k-1', title: 'DSH 会话事件与模型可见性规范', type: '架构规范', source: '平台架构组', updated: '今天 09:18', excerpt: '任何到达模型请求的输入都必须能够从会话日志重建。', status: '已索引' },
-  { id: 'k-2', title: '远程执行目标接入手册', type: '操作手册', source: '基础设施组', updated: '昨天 16:42', excerpt: '从注册、租约、心跳到断线恢复的完整接入流程。', status: '已索引' },
-  { id: 'k-3', title: '前端组件可访问性基线', type: '质量规范', source: '设计系统组', updated: '周一 11:05', excerpt: '键盘焦点、文本对比度和减少动态效果的检查清单。', status: '已索引' },
-  { id: 'k-4', title: '采集字段与脱敏规则', type: '数据规范', source: '数据平台组', updated: '周五 14:20', excerpt: '采集提示词摘要、模型和令牌，丢弃凭证与不必要的源码正文。', status: '索引中' },
 ]
 
 const MEMORIES: readonly MemoryItem[] = [
@@ -160,7 +146,7 @@ const LOCAL_ENVIRONMENT: TeamSkillEnvironment = {
 }
 
 /** Root overlay: listens to the local controller and mounts the demo shell. */
-export function PlatformSurface({ controller, t, remote, useWorkspaces }: PlatformSurfaceProps) {
+export function PlatformSurface({ controller, t, remote, useSessions, useWorkspaces }: PlatformSurfaceProps) {
   const open = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot)
 
   useEffect(() => {
@@ -173,10 +159,10 @@ export function PlatformSurface({ controller, t, remote, useWorkspaces }: Platfo
   }, [controller, open])
 
   if (!open) return null
-  return <PlatformShell controller={controller} t={t} remote={remote} useWorkspaces={useWorkspaces} />
+  return <PlatformShell controller={controller} t={t} remote={remote} useSessions={useSessions} useWorkspaces={useWorkspaces} />
 }
 
-function PlatformShell({ controller, t, remote, useWorkspaces }: Pick<PlatformSurfaceProps, 'controller' | 't' | 'remote' | 'useWorkspaces'>) {
+function PlatformShell({ controller, t, remote, useSessions, useWorkspaces }: Pick<PlatformSurfaceProps, 'controller' | 't' | 'remote' | 'useSessions' | 'useWorkspaces'>) {
   const [view, setView] = useState<ViewId>('overview')
   const [gate, setGate] = useState<AccountGate>('loading')
   const [account, setAccount] = useState<AuthenticatedAccount | undefined>()
@@ -186,14 +172,52 @@ function PlatformShell({ controller, t, remote, useWorkspaces }: Pick<PlatformSu
   const [projectId, setProjectId] = useState<string | undefined>()
   const [serviceProjects, setServiceProjects] = useState<readonly TeamSkillProject[]>([])
   const [projectAssets, setProjectAssets] = useState<readonly TeamSkillProjectAsset[] | undefined>()
+  const [knowledgeBases, setKnowledgeBases] = useState<readonly TeamSkillKnowledgeBaseSummary[]>([])
+  const [selectedKnowledgeBaseIds, setSelectedKnowledgeBaseIds] = useState<Set<string>>(() => new Set())
+  const [knowledgeSearch, setKnowledgeSearch] = useState<TeamSkillKnowledgeSearchResponse | undefined>()
+  const [knowledgePreview, setKnowledgePreview] = useState<TeamSkillKnowledgePreview | undefined>()
   const [detailProject, setDetailProject] = useState<Project | undefined>()
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | undefined>()
   const [accountDrawerOpen, setAccountDrawerOpen] = useState(false)
-  const [favoriteKnowledge, setFavoriteKnowledge] = useState<Set<string>>(() => new Set(['k-1']))
   const [memoryFilter, setMemoryFilter] = useState<'全部' | MemoryItem['scope']>('全部')
   const [collectorPaused, setCollectorPaused] = useState(false)
   const [selectedAgentId, setSelectedAgentId] = useState(AGENTS[0]!.id)
+  const currentSessionId = useSessions(s => s.current)
+  const knowledgeBinding = useRef<{ readonly sessionId: string; readonly projectId: string; readonly knowledgeBaseIds: readonly string[] } | undefined>()
+  const knowledgeSync = useRef(Promise.resolve())
+  const selectedKnowledgeKey = [...selectedKnowledgeBaseIds].sort().join('\u0000')
+
+  useEffect(() => {
+    const previous = knowledgeBinding.current
+    const sessionId = currentSessionId === undefined ? undefined : String(currentSessionId)
+    const sessionChanged = previous !== undefined && previous.sessionId !== sessionId
+    const next = sessionChanged || sessionId === undefined || projectId === undefined || selectedKnowledgeBaseIds.size === 0
+      ? undefined
+      : { sessionId, projectId, knowledgeBaseIds: [...selectedKnowledgeBaseIds] }
+    knowledgeBinding.current = next
+    if (sessionChanged) {
+      setSelectedKnowledgeBaseIds(new Set())
+      setKnowledgeSearch(undefined)
+    }
+    knowledgeSync.current = knowledgeSync.current.then(async () => {
+      if (previous !== undefined) {
+        const cleared = await remote.teamSkills.clearKnowledgeSelection(previous.sessionId)
+        if (!cleared.ok) throw new Error(cleared.error.message)
+      }
+      if (next === undefined || knowledgeBinding.current !== next) return
+      const configured = await remote.teamSkills.configureKnowledgeSelection(next.sessionId, { projectId: next.projectId, knowledgeBaseIds: next.knowledgeBaseIds })
+      if (!configured.ok) throw new Error(configured.error.message)
+      if (knowledgeBinding.current === next) setMessage(undefined)
+    }).catch(error => {
+      if (knowledgeBinding.current === next) {
+        knowledgeBinding.current = undefined
+        setSelectedKnowledgeBaseIds(new Set())
+        setKnowledgeSearch(undefined)
+        setMessage(remoteFailureMessage(error))
+      }
+    })
+  }, [currentSessionId, projectId, remote, selectedKnowledgeKey])
 
   const visibleServiceProjects = useMemo(() => {
     const projects = serviceProjects
@@ -243,7 +267,7 @@ function PlatformShell({ controller, t, remote, useWorkspaces }: Pick<PlatformSu
   }
 
   const loadAccessSummary = async (userId = account?.user.userId): Promise<void> => {
-    setGate('loading'); setProjectId(undefined); setProjectAssets(undefined); setDetailProject(undefined)
+    setGate('loading'); setProjectId(undefined); setProjectAssets(undefined); setDetailProject(undefined); setKnowledgeBases([]); setSelectedKnowledgeBaseIds(new Set()); setKnowledgeSearch(undefined)
     try {
       const [projectsResult, accessResult] = await Promise.all([remote.teamSkills.projects(), remote.teamSkills.accessSummary()])
       if (!projectsResult.ok) { showError(projectsResult.error.message); return }
@@ -263,16 +287,24 @@ function PlatformShell({ controller, t, remote, useWorkspaces }: Pick<PlatformSu
   }
 
   const projectRequest = useRef(0)
+  const knowledgeRequest = useRef(0)
   const loadProjectDetail = async (nextProjectId: string, activate: boolean, userId = account?.user.userId): Promise<void> => {
     const requestId = ++projectRequest.current
-    if (activate) { setProjectId(nextProjectId); setProjectAssets(undefined); setDetailProject(undefined) }
+    if (activate) { setProjectId(nextProjectId); setProjectAssets(undefined); setDetailProject(undefined); setKnowledgeBases([]); setSelectedKnowledgeBaseIds(new Set()); setKnowledgeSearch(undefined); setKnowledgePreview(undefined); knowledgeRequest.current += 1 }
     const result = await remote.teamSkills.project(nextProjectId)
     if (requestId !== projectRequest.current) return
-    if (!result.ok) { setProjectAssets(undefined); if (result.error.code === 'PROJECT_NOT_MEMBER' || result.error.code === 'RESOURCE_NOT_FOUND') { clearStoredProjectId(currentStorageKey(userId)); await loadAccessSummary(userId) } else showError(result.error.message); return }
+    if (!result.ok) { setProjectAssets(undefined); setKnowledgeBases([]); setSelectedKnowledgeBaseIds(new Set()); setKnowledgeSearch(undefined); if (result.error.code === 'PROJECT_NOT_MEMBER' || result.error.code === 'RESOURCE_NOT_FOUND') { clearStoredProjectId(currentStorageKey(userId)); await loadAccessSummary(userId) } else showError(result.error.message); return }
     const value = result.value
     if (isHostFailure(value) || isSignedOut(value)) { setProjectAssets(undefined); if (isSignedOut(value)) setGate('signed-out'); else showError(hostFailureMessage(value)); return }
     setDetailProject(projectModel(value.project));
-    if (activate) { setProjectAssets(value.assets); writeStoredProjectId(currentStorageKey(userId), nextProjectId) }
+    if (activate) {
+      setProjectAssets(value.assets)
+      const knowledge = await remote.teamSkills.knowledgeBases(nextProjectId)
+      if (requestId !== projectRequest.current) return
+      if (!knowledge.ok) { setKnowledgeBases([]); setSelectedKnowledgeBaseIds(new Set()); showError(knowledge.error.message); return }
+      if (isHostFailure(knowledge.value) || isSignedOut(knowledge.value)) { setKnowledgeBases([]); setSelectedKnowledgeBaseIds(new Set()); showError(isSignedOut(knowledge.value) ? '账号已退出，请重新登录。' : hostFailureMessage(knowledge.value)); return }
+      setKnowledgeBases(knowledge.value.filter(item => item.state === 'active' && item.searchable)); setSelectedKnowledgeBaseIds(new Set()); setKnowledgeSearch(undefined); setKnowledgePreview(undefined); writeStoredProjectId(currentStorageKey(userId), nextProjectId)
+    }
   }
 
   const login = async (request: TeamSkillLoginRequest): Promise<void> => {
@@ -318,7 +350,7 @@ function PlatformShell({ controller, t, remote, useWorkspaces }: Pick<PlatformSu
   }, [gate, remote])
 
   const selectProject = (nextProjectId: string, nextView: ViewId): void => {
-    if (nextProjectId.length === 0) { setProjectId(undefined); setProjectAssets(undefined); setDetailProject(undefined); clearStoredProjectId(currentStorageKey(account?.user.userId)); setView(nextView); return }
+    if (nextProjectId.length === 0) { projectRequest.current += 1; knowledgeRequest.current += 1; setProjectId(undefined); setProjectAssets(undefined); setDetailProject(undefined); setKnowledgeBases([]); setSelectedKnowledgeBaseIds(new Set()); setKnowledgeSearch(undefined); setKnowledgePreview(undefined); clearStoredProjectId(currentStorageKey(account?.user.userId)); setView(nextView); return }
     if (!availableProjects.some(item => item.id === nextProjectId)) return
     setView(nextView); setGate('ready'); void loadProjectDetail(nextProjectId, true)
   }
@@ -391,19 +423,20 @@ function PlatformShell({ controller, t, remote, useWorkspaces }: Pick<PlatformSu
         {gate === 'signed-out' && <LoginView busy={busy} error={message} onLogin={login} />}
         {gate === 'error' && <GateState title="账号服务暂不可用" message={message ?? '无法读取服务端授权，请稍后重试。'} action={<button type="button" className={css.primaryButton} onClick={() => void loadAccount()}><IconRefreshOutline16 size={15} />重新连接</button>} />}
         {gate === 'change-password' && <ChangePasswordView busy={busy} error={message} onSubmit={changePassword} />}
+        {gate === 'ready' && message !== undefined && <div className={css.surfaceNotice} role="alert">{message}</div>}
         {gate === 'ready' && access !== undefined && (
           <div className={css.content}>
             {view === 'overview' && <AssetOverviewView projects={availableProjects} assets={visibleAssets} onNavigate={setView} />}
             {view === 'projects' && <ProjectsView project={detailProject ?? project} projectId={(detailProject ?? project)?.id} projects={availableProjects} onProjectChange={projectId => { void loadProjectDetail(projectId, false) }} />}
             {view === 'skills' && <TeamSkillsView remote={remote} useWorkspaces={useWorkspaces} {...project === undefined ? {} : { projectId: project.id }} projects={visibleServiceProjects} onProjectSelect={projectId => selectProject(projectId, 'skills')} environment={LOCAL_ENVIRONMENT} visibleSkillIds={visibleResourceIds('skill')} onAuthorizationFailure={() => void refreshAuthorization()} />}
-            {view === 'knowledge' && <KnowledgeView visibleKnowledgeIds={visibleResourceIds('knowledge')} favoriteKnowledge={favoriteKnowledge} onToggleFavorite={itemId =>{  setFavoriteKnowledge(previous => toggleSet(previous, itemId)); }} />}
+            {view === 'knowledge' && <KnowledgeView projectId={projectId} knowledgeBases={knowledgeBases} selectedIds={selectedKnowledgeBaseIds} onSelectionChange={setSelectedKnowledgeBaseIds} search={knowledgeSearch} preview={knowledgePreview} onSearch={async query => { if (projectId === undefined || selectedKnowledgeBaseIds.size === 0) return; const request = ++knowledgeRequest.current; const result = await remote.teamSkills.knowledgeSearch({ projectId, knowledgeBaseIds: [...selectedKnowledgeBaseIds], query }); if (request !== knowledgeRequest.current) return; if (!result.ok) { setMessage(result.error.message); return } if (isHostFailure(result.value) || isSignedOut(result.value)) { setMessage(isSignedOut(result.value) ? '账号已退出，请重新登录。' : hostFailureMessage(result.value)); return } setKnowledgeSearch(result.value.response) }} onPreview={async (knowledgeBaseId, documentId) => { const result = await remote.teamSkills.knowledgePreview(knowledgeBaseId, documentId); if (!result.ok) { setMessage(result.error.message); return } if (isHostFailure(result.value) || isSignedOut(result.value)) { setMessage(isSignedOut(result.value) ? '账号已退出，请重新登录。' : hostFailureMessage(result.value)); return } setKnowledgePreview(result.value) }} />}
             {view === 'memory' && <MemoryView visibleMemoryIds={visibleResourceIds('memory')} filter={memoryFilter} onFilterChange={setMemoryFilter} />}
             {view === 'collector' && <CollectorView paused={collectorPaused} onToggle={() =>{  setCollectorPaused(value => !value); }} />}
             {view === 'agent-config' && <AgentConfigView agent={selectedAgent} agents={AGENTS} onAgentSelect={setSelectedAgentId} />}
           </div>
         )}
       </main>
-      {accountDrawerOpen && account !== undefined && <AccountDrawer account={account} organizations={organizations} selectedOrganizationId={organizationFilterId} onClose={() =>{ setAccountDrawerOpen(false) }} onOrganizationChange={next =>{ setOrganizationFilterId(next.length === 0 ? undefined : next); setProjectId(undefined); setView('overview') }} onRefresh={() => void refreshAuthorization()} onLogout={() => void logout()} />}
+      {accountDrawerOpen && account !== undefined && <AccountDrawer account={account} organizations={organizations} selectedOrganizationId={organizationFilterId} onClose={() =>{ setAccountDrawerOpen(false) }} onOrganizationChange={next =>{ projectRequest.current += 1; knowledgeRequest.current += 1; setOrganizationFilterId(next.length === 0 ? undefined : next); setProjectId(undefined); setProjectAssets(undefined); setDetailProject(undefined); setKnowledgeBases([]); setSelectedKnowledgeBaseIds(new Set()); setKnowledgeSearch(undefined); setKnowledgePreview(undefined); setView('overview') }} onRefresh={() => void refreshAuthorization()} onLogout={() => void logout()} />}
     </div>
   )
 }
@@ -493,13 +526,13 @@ function ProjectsView({ project, projectId, projects, onProjectChange }: { proje
   )
 }
 
-function KnowledgeView({ visibleKnowledgeIds, favoriteKnowledge, onToggleFavorite }: { visibleKnowledgeIds: readonly string[]; favoriteKnowledge: Set<string>; onToggleFavorite: (itemId: string) => void }) {
+function KnowledgeView({ projectId, knowledgeBases, selectedIds, onSelectionChange, search, preview, onSearch, onPreview }: { projectId: string | undefined; knowledgeBases: readonly TeamSkillKnowledgeBaseSummary[]; selectedIds: Set<string>; onSelectionChange: (value: Set<string>) => void; search: TeamSkillKnowledgeSearchResponse | undefined; preview: TeamSkillKnowledgePreview | undefined; onSearch: (query: string) => Promise<void>; onPreview: (knowledgeBaseId: string, documentId: string) => Promise<void> }) {
   const [query, setQuery] = useState('')
-  const items = KNOWLEDGE.filter(item => visibleKnowledgeIds.includes(item.id) && `${item.title}${item.type}${item.source}${item.excerpt}`.includes(query))
+  const toggle = (id: string): void => { const next = new Set(selectedIds); if (next.has(id)) next.delete(id); else next.add(id); onSelectionChange(next) }
   return (
     <div className={css.page}>
-      <PageIntro eyebrow="知识库" title="让规范在对话开始前就到位" description="项目与团队文档通过授权上下文进入 DSH 原生会话，来源和索引状态始终可见。" action={<label className={css.searchBox}><IconSearchOutline16 size={15} /><input value={query} onChange={event =>{  setQuery(event.target.value); }} placeholder="搜索知识条目" /></label>} />
-      <div className={css.knowledgeLayout}><section className={css.panel}><div className={css.listHeader}><span>全部资料</span><span>{items.length} 条</span></div><div className={css.knowledgeList}>{items.map(item => <button type="button" key={item.id} className={css.knowledgeRow} onClick={() =>{  onToggleFavorite(item.id); }}><span className={css.knowledgeType}>{item.type}</span><span className={css.knowledgeCopy}><strong>{item.title}</strong><small>{item.excerpt}</small><em>{item.source} · {item.updated}</em></span><span className={item.status === '已索引' ? css.indexed : css.indexing}>{item.status}</span><span className={favoriteKnowledge.has(item.id) ? `${css.star} ${css.starOn}` : css.star} aria-label={favoriteKnowledge.has(item.id) ? '已收藏' : '收藏'}>★</span></button>)}</div></section><aside className={css.knowledgeAside}><div className={css.knowledgeAsideMark}><IconArchiveOutline20 size={20} /></div><h2>授权上下文</h2><p>当前项目可读取 24 条知识，已索引 22 条。点击资料行可收藏到 DSH 原生会话上下文。</p><div className={css.contextStat}><span>项目资料<strong>14</strong></span><span>团队规范<strong>10</strong></span></div><span className={css.smallNote}>服务端连接后将按项目权限实时更新</span></aside></div>
+      <PageIntro eyebrow="知识库" title="让规范在对话开始前就到位" description={projectId === undefined ? '请先选择 active 项目。' : '只检索当前项目显式开启的知识库，检索状态和引用来源由服务端返回。'} action={<form className={css.searchBox} onSubmit={event => { event.preventDefault(); void onSearch(query.trim()) }}><IconSearchOutline16 size={15} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索知识库" /><button type="submit" aria-label="检索" disabled={projectId === undefined || selectedIds.size === 0 || query.trim().length === 0}><IconSearchOutline16 size={14} /></button></form>} />
+      <div className={css.knowledgeLayout}><section className={css.panel}><div className={css.listHeader}><span>项目知识库</span><span>{selectedIds.size} 个已开启</span></div><div className={css.knowledgeList}>{knowledgeBases.map(item => <label key={item.knowledgeBaseId} className={css.knowledgeRow}><input type="checkbox" checked={selectedIds.has(item.knowledgeBaseId)} onChange={() => toggle(item.knowledgeBaseId)} /><span className={css.knowledgeType}>{item.type}</span><span className={css.knowledgeCopy}><strong>{item.name}</strong><small>{item.description}</small><em>{item.knowledgeBaseId} · r{item.revision}</em></span><span className={item.state === 'active' ? css.indexed : css.indexing}>{item.state}</span></label>)}</div>{knowledgeBases.length === 0 && <div className={css.empty}><h2>当前项目没有可用知识库</h2><p>项目映射、成员权限和外部处理状态由服务端实时确认。</p></div>}</section><aside className={css.knowledgeAside}><div className={css.knowledgeAsideMark}><IconArchiveOutline20 size={20} /></div><h2>检索结果</h2>{search === undefined ? <p>选择一个或多个知识库并提交查询。</p> : <><p>{search.knowledgeBases.filter(item => item.status === 'skipped').map(item => `未使用 ${item.knowledgeBaseId}${item.reason === null ? '' : `（${item.reason}）`}`).join('；') || '本轮知识库均可用。'}</p><div className={css.contextStat}><span>命中<strong>{search.results.length}</strong></span><span>知识库<strong>{search.knowledgeBases.length}</strong></span></div><div className={css.knowledgeList}>{search.results.map(item => <div key={item.knowledgeId} className={css.knowledgeRow}><span className={css.knowledgeType}>引用</span><span className={css.knowledgeCopy}><strong>{item.title}</strong><small>{item.snippet}</small><em>{item.sourceUrl}</em></span><button type="button" className={css.outlineButton} onClick={() => void onPreview(item.knowledgeBaseId, item.knowledgeId)}>预览</button><span className={css.indexed}>{item.score.toFixed(2)}</span></div>)}</div>{preview !== undefined && <div className={css.callout}><strong>{preview.title}</strong><a href={preview.previewUrl} target="_blank" rel="noreferrer">打开受权预览</a></div>}</>}</aside></div>
     </div>
   )
 }
@@ -668,11 +701,4 @@ function remoteFailureMessage(error: unknown): string {
 
 function isAccessSummary(value: unknown): value is TeamSkillAccessSummary {
   return typeof value === 'object' && value !== null && 'organizations' in value && Array.isArray(value.organizations) && 'projects' in value && Array.isArray(value.projects) && 'assets' in value && Array.isArray(value.assets)
-}
-
-function toggleSet(current: Set<string>, value: string): Set<string> {
-  const next = new Set(current)
-  if (next.has(value)) next.delete(value)
-  else next.add(value)
-  return next
 }

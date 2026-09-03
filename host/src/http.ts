@@ -21,6 +21,10 @@ import type {
   TeamSkillOperationStatus,
   TeamSkillReleaseStatusItem,
   TeamSkillScope,
+  TeamSkillKnowledgeBaseSummary,
+  TeamSkillKnowledgeSearchRequest,
+  TeamSkillKnowledgeSearchResponse,
+  TeamSkillKnowledgePreview,
 } from './types.ts'
 import type { TeamSkillFileDigest } from './installer.ts'
 
@@ -192,6 +196,30 @@ export class TeamSkillHttpClient {
   async catalog(projectId: string): Promise<TeamSkillCatalog> {
     const body = await this.request(`/team-skills?project_id=${encodeURIComponent(projectId)}`, { method: 'GET' })
     return parseCatalog(body)
+  }
+
+  /** Read the current project knowledge-base summaries. */
+  async knowledgeBases(projectId: string): Promise<readonly TeamSkillKnowledgeBaseSummary[]> {
+    const body = await this.request(`/projects/${encodeURIComponent(projectId)}/knowledge-bases`, { method: 'GET' })
+    const record = requireRecord(body, 'knowledge base response')
+    return Object.freeze(requireArray(record.items, 'knowledge base items').map(parseKnowledgeBase))
+  }
+
+  /** Search only the explicitly selected project knowledge bases. */
+  async knowledgeSearch(request: Omit<TeamSkillKnowledgeSearchRequest, 'projectId'> & { readonly projectId: string }, signal?: AbortSignal): Promise<TeamSkillKnowledgeSearchResponse> {
+    const body = await this.request(`/projects/${encodeURIComponent(request.projectId)}/knowledge-search`, {
+      method: 'POST',
+      body: JSON.stringify({ query: request.query, knowledge_base_ids: request.knowledgeBaseIds, ...(request.topK === undefined ? {} : { top_k: request.topK }), ...(request.traceId === undefined ? {} : { trace_id: request.traceId }) }),
+      ...signal === undefined ? {} : { signal },
+    })
+    return parseKnowledgeSearch(body)
+  }
+
+  /** Return a server-authorized document preview URL. */
+  async knowledgePreview(knowledgeBaseId: string, documentId: string): Promise<TeamSkillKnowledgePreview> {
+    const body = await this.request(`/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/${encodeURIComponent(documentId)}/preview`, { method: 'GET' })
+    const record = requireRecord(body, 'knowledge preview')
+    return { knowledgeBaseId: requireString(record.knowledge_base_id, 'preview knowledge_base_id'), documentId: requireString(record.document_id, 'preview document_id'), title: requireString(record.title, 'preview title'), previewUrl: requireString(record.preview_url, 'preview preview_url') }
   }
 
   /** Read publication state for installed versions before local discovery is refreshed.
@@ -397,6 +425,33 @@ function parseProjectAsset(value: unknown): TeamSkillProjectAsset {
   if (assetType !== 'skill' && assetType !== 'knowledge' && assetType !== 'memory') throw new TeamSkillHttpError('SERVICE_PROTOCOL_ERROR', 'AI Coding service returned invalid project asset type.')
   if (relationKind !== 'reference' && relationKind !== 'context') throw new TeamSkillHttpError('SERVICE_PROTOCOL_ERROR', 'AI Coding service returned invalid project relation kind.')
   return { projectId: requireString(record.project_id, 'project asset project_id'), assetType, assetId: requireString(record.asset_id, 'project asset asset_id'), name: requireString(record.name, 'project asset name'), relationKind, createdAt: requireString(record.created_at, 'project asset created_at'), updatedAt: requireString(record.updated_at, 'project asset updated_at'), revision: requireNumber(record.revision, 'project asset revision') }
+}
+
+function parseKnowledgeBase(value: unknown): TeamSkillKnowledgeBaseSummary {
+  const record = requireRecord(value, 'knowledge base')
+  const type = record.type
+  const state = record.state
+  if (type !== 'document' && type !== 'faq' && type !== 'wiki') throw new TeamSkillHttpError('SERVICE_PROTOCOL_ERROR', 'AI Coding service returned invalid knowledge base type.')
+  if (state !== 'active' && state !== 'unavailable' && state !== 'deleting') throw new TeamSkillHttpError('SERVICE_PROTOCOL_ERROR', 'AI Coding service returned invalid knowledge base state.')
+  return Object.freeze({ knowledgeBaseId: requireString(record.knowledge_base_id, 'knowledge_base_id'), name: requireString(record.name, 'knowledge base name'), description: requireString(record.description, 'knowledge base description'), type, state, searchable: requireBoolean(record.searchable, 'knowledge base searchable'), updatedAt: requireString(record.updated_at, 'knowledge base updated_at'), revision: requireNumber(record.revision, 'knowledge base revision') })
+}
+
+function parseKnowledgeSearch(value: unknown): TeamSkillKnowledgeSearchResponse {
+  const record = requireRecord(value, 'knowledge search')
+  const statuses: TeamSkillKnowledgeSearchResponse['knowledgeBases'] = requireArray(record.knowledge_bases, 'knowledge search statuses').map(item => {
+    const entry = requireRecord(item, 'knowledge search status')
+    const status = entry.status
+    if (status !== 'used' && status !== 'no_hits' && status !== 'skipped') throw new TeamSkillHttpError('SERVICE_PROTOCOL_ERROR', 'AI Coding service returned invalid knowledge search status.')
+    const reason = entry.reason === null || entry.reason === undefined || entry.reason === 'processing' || entry.reason === 'unavailable' || entry.reason === 'forbidden' || entry.reason === 'not_found' || entry.reason === 'timeout' || entry.reason === 'external_error' ? entry.reason ?? null : undefined
+    if (reason === undefined) throw new TeamSkillHttpError('SERVICE_PROTOCOL_ERROR', 'AI Coding service returned invalid knowledge search reason.')
+    return { knowledgeBaseId: requireString(entry.knowledge_base_id, 'knowledge search knowledge_base_id'), status: status as 'used' | 'no_hits' | 'skipped', reason }
+  })
+  const results = requireArray(record.results, 'knowledge search results').map(item => {
+    const entry = requireRecord(item, 'knowledge search result')
+    const citation = recordOf(entry.citation)
+    return { knowledgeBaseId: requireString(entry.knowledge_base_id, 'knowledge result knowledge_base_id'), knowledgeId: requireString(entry.knowledge_id, 'knowledge result knowledge_id'), title: requireString(entry.title, 'knowledge result title'), snippet: requireString(entry.snippet, 'knowledge result snippet'), score: requireNumber(entry.score, 'knowledge result score'), sourceUrl: requireString(entry.source_url, 'knowledge result source_url'), ...(citation === undefined ? {} : { citation: { ...(citation.page === undefined ? {} : { page: requireNumber(citation.page, 'citation page') }), ...(citation.chunk === undefined ? {} : { chunk: requireString(citation.chunk, 'citation chunk') }) } }) }
+  })
+  return Object.freeze({ requestId: requireString(record.request_id, 'knowledge search request_id'), results: Object.freeze(results), knowledgeBases: Object.freeze(statuses) })
 }
 
 function parseAsset(value: unknown): TeamSkillAsset {

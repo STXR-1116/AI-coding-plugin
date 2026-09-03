@@ -29,6 +29,10 @@ import type {
   TeamSkillUninstallResult,
   TeamSkillProject,
   TeamSkillProjectDetail,
+  TeamSkillKnowledgeBaseSummary,
+  TeamSkillKnowledgeSearchRequest,
+  TeamSkillKnowledgeSearchResponse,
+  TeamSkillKnowledgePreview,
 } from './types.ts'
 
 const ACCOUNT_CREDENTIAL_KEY = credentialKey('dsh-ai-coding-platform', 'account')
@@ -201,6 +205,23 @@ export class TeamSkillHost {
     } catch (error) {
       return failureOf(error)
     }
+  }
+
+  /** Read current project knowledge-base summaries through the service. */
+  async knowledgeBases(projectId: string): Promise<TeamSkillAccountResult<readonly TeamSkillKnowledgeBaseSummary[]>> {
+    return this.knowledgeRequest(client => client.knowledgeBases(projectId))
+  }
+
+  /** Search explicitly selected knowledge bases for one conversation turn. */
+  async knowledgeSearch(request: TeamSkillKnowledgeSearchRequest, signal?: AbortSignal): Promise<TeamSkillAccountResult<{ readonly status: 'ready'; readonly response: TeamSkillKnowledgeSearchResponse }>> {
+    const result = await this.knowledgeRequest(client => client.knowledgeSearch(request, signal), signal)
+    if (isKnowledgeFailure(result)) return result
+    return { status: 'ready', response: result }
+  }
+
+  /** Resolve an authorized document preview URL. */
+  async knowledgePreview(knowledgeBaseId: string, documentId: string): Promise<TeamSkillAccountResult<TeamSkillKnowledgePreview>> {
+    return this.knowledgeRequest(client => client.knowledgePreview(knowledgeBaseId, documentId))
   }
 
   /** Return browser-safe, service-authorized installation summaries for one project.
@@ -426,19 +447,42 @@ export class TeamSkillHost {
     await this.options.credentials?.deleteRecord(ACCOUNT_CREDENTIAL_KEY)
   }
 
-  private async accountRequest<T>(client: TeamSkillAccountHttpClient, session: AccountGrant, operation: (accessToken: string) => Promise<T>): Promise<T> {
+  private async accountRequest<T>(client: TeamSkillAccountHttpClient, session: AccountGrant, operation: (accessToken: string) => Promise<T>, signal?: AbortSignal): Promise<T> {
+    signal?.throwIfAborted()
     try {
       if (session.expiresAt <= Date.now() + 30_000) {
         const refreshed = await client.refresh(session.refreshToken)
         await this.writeAccountSession(refreshed)
+        signal?.throwIfAborted()
         return await operation(refreshed.accessToken)
       }
       return await operation(session.accessToken)
     } catch (error) {
       if (!(error instanceof TeamSkillHttpError) || !isExpiredTokenCode(error.code)) throw error
+      signal?.throwIfAborted()
       const refreshed = await client.refresh(session.refreshToken)
       await this.writeAccountSession(refreshed)
+      signal?.throwIfAborted()
       return await operation(refreshed.accessToken)
+    }
+  }
+
+  private async knowledgeRequest<T>(operation: (client: TeamSkillHttpClient) => Promise<T>, signal?: AbortSignal): Promise<T | TeamSkillNotReady | TeamSkillFailed | { readonly status: 'signed-out' }> {
+    signal?.throwIfAborted()
+    if (this.options.accessToken !== undefined || this.options.credentials === undefined) {
+      const client = await this.client()
+      if ('status' in client) return client
+      try { return await operation(client) } catch (error) { return failureOf(error) }
+    }
+    const accountClient = this.accountClient()
+    if ('status' in accountClient) return accountClient
+    const session = await this.readAccountSession()
+    if (session === undefined) return { status: 'signed-out' }
+    try {
+      return await this.accountRequest(accountClient, session, accessToken => operation(new TeamSkillHttpClient({ apiBaseUrl: this.options.apiBaseUrl!, accessToken, ...this.options.fetch === undefined ? {} : { fetch: this.options.fetch } })), signal)
+    } catch (error) {
+      if (error instanceof TeamSkillHttpError && isExpiredTokenCode(error.code)) { await this.clearAccountSession(); return { status: 'signed-out' } }
+      return failureOf(error)
     }
   }
 
@@ -498,6 +542,12 @@ function failureOf(error: unknown): TeamSkillFailed {
     code: 'LOCAL_OPERATION_FAILED',
     message: error instanceof Error ? error.message : 'Team Skill local operation failed.',
   })
+}
+
+function isKnowledgeFailure<T>(value: T | TeamSkillNotReady | TeamSkillFailed | { readonly status: 'signed-out' }): value is TeamSkillNotReady | TeamSkillFailed | { readonly status: 'signed-out' } {
+  if (typeof value !== 'object' || value === null || !('status' in value)) return false
+  const status = (value as { readonly status?: unknown }).status
+  return status === 'not-ready' || status === 'failed' || status === 'signed-out'
 }
 
 function sameScope(

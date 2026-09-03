@@ -2,11 +2,12 @@
 
 本目录是交给 AI coding 服务端同事进行 API 开发和 HTTP 联调的第一方插件源码快照。插件由 DSH Host 侧桥接和 Web Client 协作台两部分组成，源码分别位于 `host/` 和 `client/`。`apps/team-skill-service` 内存服务不在本交付物中；它只用于原仓库的本地联调测试，不能作为生产后端实现。
 
-接口和交互的确认文档随交付物保存在 `docs/服务API-项目管理需求文档.md` 与 `docs/插件-项目管理设计文档.md`，实现以这两份文档和源码共同约束。
+接口和交互的确认文档随交付物保存在 `docs/`，包括项目管理和知识库设计/API 文档；实现以这些文档和源码共同约束。
 
 ## 交付范围
 
 - `host/src`：账号会话、项目读取、项目授权资产读取、Team Skill 目录、版本授权、ZIP 校验、原子安装、卸载、隔离和 Typert Remote 网关。
+- `host/src/knowledge-loop.ts`：DSH 原生 `agent/pre-step` 自动检索、`knowledge-search` 会话事件和当前轮次取消；知识库列表、检索与预览通过 Host Remote 统一请求。
 - `host/tests`：Host、HTTP 客户端、Remote 装配和真实 HTTP 夹具测试。
 - `client/src`：协作台入口、账号状态、按组织分组的项目选择器、项目详情只读页、Team Skill/知识库/记忆视图和失败状态呈现。
 - `client/tests`：浏览器端项目恢复、原子切换、授权过滤和 Team Skill 操作测试。
@@ -74,7 +75,7 @@ Host 配置字段如下：
 
 `client/src/client/index.ts` 注册 `sidebar.footer.action` 和 `shell.overlay`，导出 `apply`、`inject`、`PlatformEntry`、`PlatformSurface`、`PlatformDemoController`。所有账号和项目方法都通过 Host 的 `teamSkills` Remote 调用，浏览器不直接访问服务端，不持有令牌。
 
-协作台中的知识库、记忆、数据采集和 Agent 配置仍有演示内容；只有项目/资产 ID 同时出现在服务端访问摘要中时才渲染项目级演示条目。当前 Client 不执行 Skill 内容，不提供后台治理写入口，也不把项目上下文注入 DSH Session。
+知识库已接入当前项目选择、显式检索、每轮自动检索、引用预览、会话事件和当前轮取消；后台治理写入口不在本仓库。记忆、数据采集和 Agent 配置仍是演示视图。只有项目/资产 ID 同时出现在服务端访问摘要中时才渲染项目级内容；项目上下文不注入 DSH 原生 Session。
 
 ## 本地联调与校验
 
@@ -87,7 +88,7 @@ pnpm exec tsc -b packages/platform/ai-coding-platform/tsconfig.json packages/cli
 pnpm --filter @deepseek-ai/dsh-client-ui-ai-coding-platform run bundle
 ```
 
-内存服务由原仓库 `apps/team-skill-service` 启动，默认监听 `http://127.0.0.1:4100`，健康检查为 `/health`。设置 `DSH_AI_CODING_PLATFORM_API_URL=http://127.0.0.1:4100/v1` 后启动 Web Bundle。内存服务只覆盖当前插件和后台已开发流程，不提供生产数据库、OIDC、对象存储、游标分页或完整资产模块；生产实现必须以服务 API 需求文档为准。
+内存服务由原仓库 `apps/team-skill-service` 启动，默认监听 `http://127.0.0.1:4100`，健康检查为 `/health`。设置 `DSH_AI_CODING_PLATFORM_API_URL=http://127.0.0.1:4100/v1` 后启动 Web Bundle。知识库默认使用内存文本匹配 fixture，不连接真实 WeKnora；文件导入只接受 JSON 文件名描述，不保存 multipart 字节。服务还不提供生产数据库、OIDC、对象存储、游标分页、FAQ/Wiki/Graph CRUD 或完整审计；生产实现必须以 `docs/服务API-知识库需求文档.md` 为准。
 
 ## 后端交接清单
 

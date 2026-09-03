@@ -159,6 +159,78 @@ export interface TeamSkillChangePasswordRequest {
 /** Account operation result projected through the typed Remote. */
 export type TeamSkillAccountResult<T> = T | { readonly status: 'signed-out' } | TeamSkillNotReady | TeamSkillFailed
 
+/** Knowledge base type owned by the external WeKnora data plane. */
+export type TeamSkillKnowledgeBaseType = 'document' | 'faq' | 'wiki'
+
+/** Platform lifecycle state for one knowledge base. */
+export type TeamSkillKnowledgeBaseState = 'active' | 'unavailable' | 'deleting'
+
+/** Browser-safe project knowledge base summary. */
+export interface TeamSkillKnowledgeBaseSummary {
+  readonly knowledgeBaseId: string
+  readonly name: string
+  readonly description: string
+  readonly type: TeamSkillKnowledgeBaseType
+  readonly state: TeamSkillKnowledgeBaseState
+  readonly searchable: boolean
+  readonly updatedAt: string
+  readonly revision: number
+}
+
+/** Citation location returned with an authorized search result. */
+export interface TeamSkillKnowledgeCitation {
+  readonly page?: number
+  readonly chunk?: string
+}
+
+/** One constrained, model-visible knowledge result. */
+export interface TeamSkillKnowledgeSearchResult {
+  readonly knowledgeBaseId: string
+  readonly knowledgeId: string
+  readonly title: string
+  readonly snippet: string
+  readonly score: number
+  readonly sourceUrl: string
+  readonly citation?: TeamSkillKnowledgeCitation
+}
+
+/** Per-knowledge-base status for a search request. */
+export interface TeamSkillKnowledgeSearchStatus {
+  readonly knowledgeBaseId: string
+  readonly status: 'used' | 'no_hits' | 'skipped'
+  readonly reason?: 'processing' | 'unavailable' | 'forbidden' | 'not_found' | 'timeout' | 'external_error' | null
+}
+
+/** Platform search response preserving per-KB status. */
+export interface TeamSkillKnowledgeSearchResponse {
+  readonly requestId: string
+  readonly results: readonly TeamSkillKnowledgeSearchResult[]
+  readonly knowledgeBases: readonly TeamSkillKnowledgeSearchStatus[]
+}
+
+/** Request for one explicit project-scoped knowledge search. */
+export interface TeamSkillKnowledgeSearchRequest {
+  readonly projectId: string
+  readonly knowledgeBaseIds: readonly string[]
+  readonly query: string
+  readonly topK?: number
+  readonly traceId?: string
+}
+
+/** Session-only knowledge bases selected for one live native DSH agent. */
+export interface TeamSkillKnowledgeSelection {
+  readonly projectId: string
+  readonly knowledgeBaseIds: readonly string[]
+}
+
+/** Minimal authorized document preview link. */
+export interface TeamSkillKnowledgePreview {
+  readonly knowledgeBaseId: string
+  readonly documentId: string
+  readonly title: string
+  readonly previewUrl: string
+}
+
 /** Server-controlled publication state of a Team Skill version. */
 export type TeamSkillReleaseState = 'published' | 'withdrawn'
 

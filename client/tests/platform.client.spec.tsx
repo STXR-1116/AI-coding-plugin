@@ -45,6 +45,10 @@ const demoProjectDetail = {
   project: demoProject,
   assets: [{ projectId: 'orbit-ui', assetType: 'skill' as const, assetId: 'skill-review', name: '代码评审', relationKind: 'reference' as const, createdAt: '2026-08-29T08:00:00Z', updatedAt: '2026-08-29T08:00:00Z', revision: 1 }],
 }
+const demoKnowledgeBases = [
+  { knowledgeBaseId: 'k-1', name: 'DSH 会话事件与模型可见性规范', description: '会话日志与模型可见性要求。', type: 'document' as const, state: 'active' as const, searchable: true, updatedAt: '2026-08-29T08:00:00Z', revision: 1 },
+  { knowledgeBaseId: 'k-2', name: '远程执行目标接入手册', description: '远程执行目标的接入约定。', type: 'document' as const, state: 'active' as const, searchable: true, updatedAt: '2026-08-29T08:00:00Z', revision: 1 },
+]
 const demoAccess = {
   organizations: demoOrganizations,
   projects: [demoProject],
@@ -64,6 +68,8 @@ const demoWorkspaceState: WorkspaceListState = {
   archivedSessionIds: [], state: 'idle', phase: 'ready', error: null, baselinesReady: true, recentWorkspaceId: 'ws-1' as WorkspaceId,
 }
 
+const demoSessionState = { current: 'session-1', byId: { 'session-1': { blank: false } } }
+
 function demoRemote(): ClientRemote {
   return {
     teamSkills: {
@@ -75,6 +81,11 @@ function demoRemote(): ClientRemote {
       organizations: vi.fn(async () => ({ ok: true, value: demoOrganizations })),
       projects: vi.fn(async () => ({ ok: true, value: [demoProject] })),
       project: vi.fn(async () => ({ ok: true, value: demoProjectDetail })),
+      knowledgeBases: vi.fn(async () => ({ ok: true, value: demoKnowledgeBases })),
+      knowledgeSearch: vi.fn(async () => ({ ok: true, value: { status: 'ready' as const, response: { requestId: 'req-1', results: [], knowledgeBases: [] } } })),
+      knowledgePreview: vi.fn(async () => ({ ok: true, value: { knowledgeBaseId: 'k-1', documentId: 'doc-1', title: '预览', previewUrl: 'https://service.test/preview/doc-1' } })),
+      configureKnowledgeSelection: vi.fn(async () => ({ ok: true as const, value: undefined })),
+      clearKnowledgeSelection: vi.fn(async () => ({ ok: true as const, value: undefined })),
       accessSummary: vi.fn(async () => ({ ok: true, value: demoAccess })),
       catalog: vi.fn(async () => ({ ok: true, value: demoCatalog })),
       installations: vi.fn(async () => ({ ok: true, value: [] })),
@@ -95,12 +106,83 @@ function mountSurface(controller = new PlatformDemoController(), remote = demoRe
   const props = {
     controller,
     t,
-    useSessions: (() => ({ current: undefined, byId: {} })) as never,
+    useSessions: (<S,>(selector: (state: typeof demoSessionState) => S): S => selector(demoSessionState)) as never,
     useWorkspaces: (<S,>(selector: (state: WorkspaceListState) => S): S => selector(demoWorkspaceState)) as never,
     remote,
   } as PlatformSurfaceProps
   return { controller, ...render(<PlatformSurface {...props} />) }
 }
+
+it('binds selected knowledge bases to the current native DSH session and clears them on project changes', async () => {
+  const controller = new PlatformDemoController()
+  controller.open()
+  const remote = demoRemote()
+  mountSurface(controller, remote)
+
+  expect(await screen.findByRole('heading', { name: '从权限范围内的资产开始协作' })).toBeTruthy()
+  fireEvent.change(screen.getByLabelText('当前项目'), { target: { value: 'orbit-ui' } })
+  await waitFor(() => expect(screen.getByLabelText('当前项目')).toHaveProperty('value', 'orbit-ui'))
+  fireEvent.click(within(screen.getByRole('navigation', { name: '平台模块' })).getByRole('button', { name: '知识库' }))
+  await screen.findByText('DSH 会话事件与模型可见性规范')
+  const knowledgeRow = screen.getByText('DSH 会话事件与模型可见性规范').closest('label')
+  if (knowledgeRow === null) throw new Error('knowledge row not found')
+  fireEvent.click(knowledgeRow.querySelector('input'))
+
+  await waitFor(() => expect(remote.teamSkills.configureKnowledgeSelection).toHaveBeenCalledWith('session-1', {
+    projectId: 'orbit-ui',
+    knowledgeBaseIds: ['k-1'],
+  }))
+
+  fireEvent.change(screen.getByLabelText('当前项目'), { target: { value: '' } })
+  await waitFor(() => expect(remote.teamSkills.clearKnowledgeSelection).toHaveBeenCalledWith('session-1'))
+})
+
+it('shows a configure rejection and does not retain a local knowledge binding', async () => {
+  const controller = new PlatformDemoController()
+  controller.open()
+  const remote = demoRemote()
+  remote.teamSkills.configureKnowledgeSelection = vi.fn(async () => ({
+    ok: false as const,
+    error: { code: 'SESSION_NOT_FOUND', message: '当前 DSH 会话已结束。', details: {} },
+  }))
+  mountSurface(controller, remote)
+
+  expect(await screen.findByRole('heading', { name: '从权限范围内的资产开始协作' })).toBeTruthy()
+  fireEvent.change(screen.getByLabelText('当前项目'), { target: { value: 'orbit-ui' } })
+  await waitFor(() => expect(screen.getByLabelText('当前项目')).toHaveProperty('value', 'orbit-ui'))
+  fireEvent.click(within(screen.getByRole('navigation', { name: '平台模块' })).getByRole('button', { name: '知识库' }))
+  const knowledgeRow = (await screen.findByText('DSH 会话事件与模型可见性规范')).closest('label')
+  if (knowledgeRow === null) throw new Error('knowledge row not found')
+  fireEvent.click(knowledgeRow.querySelector('input'))
+
+  expect((await screen.findByRole('alert')).textContent).toContain('当前 DSH 会话已结束。')
+  fireEvent.change(screen.getByLabelText('当前项目'), { target: { value: '' } })
+  await waitFor(() => expect(remote.teamSkills.clearKnowledgeSelection).not.toHaveBeenCalled())
+})
+
+it('shows a clear rejection without attempting a new local binding', async () => {
+  const controller = new PlatformDemoController()
+  controller.open()
+  const remote = demoRemote()
+  remote.teamSkills.clearKnowledgeSelection = vi.fn(async () => ({
+    ok: false as const,
+    error: { code: 'SESSION_NOT_FOUND', message: '当前 DSH 会话已结束。', details: {} },
+  }))
+  mountSurface(controller, remote)
+
+  expect(await screen.findByRole('heading', { name: '从权限范围内的资产开始协作' })).toBeTruthy()
+  fireEvent.change(screen.getByLabelText('当前项目'), { target: { value: 'orbit-ui' } })
+  await waitFor(() => expect(screen.getByLabelText('当前项目')).toHaveProperty('value', 'orbit-ui'))
+  fireEvent.click(within(screen.getByRole('navigation', { name: '平台模块' })).getByRole('button', { name: '知识库' }))
+  const knowledgeRow = (await screen.findByText('DSH 会话事件与模型可见性规范')).closest('label')
+  if (knowledgeRow === null) throw new Error('knowledge row not found')
+  fireEvent.click(knowledgeRow.querySelector('input'))
+  await waitFor(() => expect(remote.teamSkills.configureKnowledgeSelection).toHaveBeenCalled())
+
+  fireEvent.change(screen.getByLabelText('当前项目'), { target: { value: '' } })
+  expect((await screen.findByRole('alert')).textContent).toContain('当前 DSH 会话已结束。')
+  expect(remote.teamSkills.configureKnowledgeSelection).toHaveBeenCalledTimes(1)
+})
 
 describe('AI Coding platform demo', () => {
   it('enters the asset overview immediately after Host authentication', async () => {
@@ -179,9 +261,7 @@ describe('AI Coding platform demo', () => {
     expect(await screen.findByText('已安装到当前项目')).toBeTruthy()
 
     fireEvent.click(within(nav).getByRole('button', { name: '知识库' }))
-    const knowledgeRow = screen.getByRole('button', { name: /远程执行目标接入手册/ })
-    fireEvent.click(knowledgeRow)
-    expect(knowledgeRow.querySelector('[aria-label="已收藏"]')).not.toBeNull()
+    expect(await screen.findByText('远程执行目标接入手册')).toBeTruthy()
 
     fireEvent.click(within(nav).getByRole('button', { name: '记忆库' }))
     fireEvent.click(screen.getByRole('button', { name: /^团队$/ }))
@@ -213,6 +293,8 @@ describe('AI Coding platform demo', () => {
 
     expect(await screen.findByRole('heading', { name: '从权限范围内的资产开始协作' })).toBeTruthy()
     const nav = screen.getByRole('navigation', { name: '平台模块' })
+    fireEvent.change(screen.getByLabelText('当前项目'), { target: { value: 'orbit-ui' } })
+    await waitFor(() => expect(screen.getByLabelText('当前项目')).toHaveProperty('value', 'orbit-ui'))
     fireEvent.click(within(nav).getByRole('button', { name: '知识库' }))
     expect(screen.getByText('DSH 会话事件与模型可见性规范')).toBeTruthy()
     expect(screen.queryByText('前端组件可访问性基线')).toBeNull()

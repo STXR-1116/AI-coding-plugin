@@ -11,4 +11,6 @@ export {
 } from './installer.ts'
 export { TeamSkillHost } from './host.ts'
 export { TeamSkillGateway } from './gateway.ts'
+export { TeamSkillKnowledgeLoop } from './knowledge-loop.ts'
+export type { TeamSkillKnowledgeSelection, TeamSkillKnowledgeSearch } from './knowledge-loop.ts'
 export { default } from './gateway.ts'

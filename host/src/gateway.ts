@@ -5,6 +5,8 @@ import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-skill'
 import { TeamSkillHost } from './host.ts'
@@ -24,7 +26,13 @@ import type {
   TeamSkillUninstallResult,
   TeamSkillProject,
   TeamSkillProjectDetail,
+  TeamSkillKnowledgeBaseSummary,
+  TeamSkillKnowledgeSearchRequest,
+  TeamSkillKnowledgeSearchResponse,
+  TeamSkillKnowledgePreview,
 } from './types.ts'
+import { TeamSkillKnowledgeLoop } from './knowledge-loop.ts'
+import type { TeamSkillKnowledgeSelection } from './knowledge-loop.ts'
 
 /** Deployment-owned Team Skill Host configuration. */
 export interface Config {
@@ -47,7 +55,7 @@ declare module '@deepseek-ai/cordis' {
 
 /** Host service that exposes Team Skill operations through the typed Remote gateway. */
 export class TeamSkillGateway extends TypertRemoteService {
-  static inject = ['skills', 'workspaceRegistry']
+  static inject = ['skills', 'workspaceRegistry', 'agents']
 
   static Config: Schema<Config> = z.object({
     apiBaseUrl: z.string(),
@@ -57,6 +65,8 @@ export class TeamSkillGateway extends TypertRemoteService {
   })
 
   private readonly host: TeamSkillHost
+  private readonly knowledgeSelections = new WeakMap<Agent, TeamSkillKnowledgeSelection>()
+  private readonly knowledgeLoop: TeamSkillKnowledgeLoop
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'teamSkills')
@@ -72,6 +82,31 @@ export class TeamSkillGateway extends TypertRemoteService {
         (await ctx.skills.list(...workspacePath === undefined ? [] : [{ cwd: workspacePath }]))
           .some(skill => skill.name === runtimeName) === expectedPresent,
     })
+    this.knowledgeLoop = new TeamSkillKnowledgeLoop(ctx, {
+      resolveSelection: agent => this.knowledgeSelections.get(agent),
+      search: (request, signal) => this.host.knowledgeSearch(request, signal).then(result => {
+        if (result.status === 'ready') return result
+        return result
+      }),
+    })
+    ctx.on('agent/disposed', ({ agent }) => { this.knowledgeSelections.delete(agent) })
+    ctx.effect(() => () => this.knowledgeLoop.dispose(), 'ai-coding-platform: knowledge loop')
+  }
+
+  /** Select project knowledge bases for one live native DSH session. */
+  private setKnowledgeSelection(agent: Agent, selection: TeamSkillKnowledgeSelection): void {
+    if (this.ctx.agents.get(agent.id) !== agent) throw new Error(`agent "${agent.id}" is not live in the registry`)
+    if (selection.projectId.length === 0 || selection.knowledgeBaseIds.length === 0) {
+      this.knowledgeSelections.delete(agent)
+      return
+    }
+    this.knowledgeSelections.set(agent, Object.freeze({ projectId: selection.projectId, knowledgeBaseIds: Object.freeze([...new Set(selection.knowledgeBaseIds)]) }))
+  }
+
+  /** Clear the session-only knowledge selection without touching the Session log. */
+  private clearKnowledgeSelectionForAgent(agent: Agent): void {
+    if (this.ctx.agents.get(agent.id) !== agent) throw new Error(`agent "${agent.id}" is not live in the registry`)
+    this.knowledgeSelections.delete(agent)
   }
 
   /** Authenticate through the service and persist the session in Host credentials.
@@ -148,6 +183,40 @@ export class TeamSkillGateway extends TypertRemoteService {
   @Remote('catalog')
   catalog(projectId: string): Promise<TeamSkillCatalogResult> {
     return this.host.catalog(projectId)
+  }
+
+  /** Read the current project's knowledge-base summaries. */
+  @Remote('knowledgeBases')
+  knowledgeBases(projectId: string): Promise<TeamSkillAccountResult<readonly TeamSkillKnowledgeBaseSummary[]>> {
+    return this.host.knowledgeBases(projectId)
+  }
+
+  /** Search the explicitly selected knowledge bases for one conversation turn. */
+  @Remote('knowledgeSearch')
+  knowledgeSearch(request: TeamSkillKnowledgeSearchRequest): Promise<TeamSkillAccountResult<{ readonly status: 'ready'; readonly response: TeamSkillKnowledgeSearchResponse }>> {
+    return this.host.knowledgeSearch(request)
+  }
+
+  /** Resolve an authorized knowledge document preview. */
+  @Remote('knowledgePreview')
+  knowledgePreview(knowledgeBaseId: string, documentId: string): Promise<TeamSkillAccountResult<TeamSkillKnowledgePreview>> {
+    return this.host.knowledgePreview(knowledgeBaseId, documentId)
+  }
+
+  /** Enable session-only knowledge recall for the live agent behind one session id. */
+  @Remote('configureKnowledgeSelection')
+  configureKnowledgeSelection(sessionId: string, selection: TeamSkillKnowledgeSelection): void {
+    const agent = this.ctx.agents.get(SessionId(sessionId))
+    if (agent === undefined) throw new Error(`session "${sessionId}" is not a live agent`)
+    this.setKnowledgeSelection(agent, selection)
+  }
+
+  /** Clear session-only knowledge recall for the live agent behind one session id. */
+  @Remote('clearKnowledgeSelection')
+  clearKnowledgeSelection(sessionId: string): void {
+    const agent = this.ctx.agents.get(SessionId(sessionId))
+    if (agent === undefined) throw new Error(`session "${sessionId}" is not a live agent`)
+    this.clearKnowledgeSelectionForAgent(agent)
   }
 
   /** Return local copies managed by this Host, or an explicit local-state error.
