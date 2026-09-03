@@ -75,7 +75,7 @@ Host 配置字段如下：
 
 `client/src/client/index.ts` 注册 `sidebar.footer.action` 和 `shell.overlay`，导出 `apply`、`inject`、`PlatformEntry`、`PlatformSurface`、`PlatformDemoController`。所有账号和项目方法都通过 Host 的 `teamSkills` Remote 调用，浏览器不直接访问服务端，不持有令牌。
 
-知识库已接入当前项目选择、显式检索、每轮自动检索、引用预览、会话事件和当前轮取消；后台治理写入口不在本仓库。记忆、数据采集和 Agent 配置仍是演示视图。只有项目/资产 ID 同时出现在服务端访问摘要中时才渲染项目级内容；项目上下文不注入 DSH 原生 Session。
+知识库已接入当前项目选择、显式检索、每轮自动检索、引用预览、会话事件和当前轮取消；项目记忆已接入 Host 的 `agent/pre-step` 自动召回、Stop/agent-end 自动捕获，以及通过 Remote 执行列表、搜索、详情、编辑和删除。记忆操作使用服务端 revision、`If-Match`、`expected_revision` 和 `Idempotency-Key`；服务不可用、项目失权、冲突和删除清理失败均显示明确状态，不使用本地成功或旧缓存。后台治理写入口不在本仓库。只有项目/资产 ID 同时出现在服务端访问摘要中时才渲染项目级内容；项目上下文不注入 DSH 原生 Session。
 
 ## 本地联调与校验
 
@@ -88,7 +88,7 @@ pnpm exec tsc -b packages/platform/ai-coding-platform/tsconfig.json packages/cli
 pnpm --filter @deepseek-ai/dsh-client-ui-ai-coding-platform run bundle
 ```
 
-内存服务由原仓库 `apps/team-skill-service` 启动，默认监听 `http://127.0.0.1:4100`，健康检查为 `/health`。设置 `DSH_AI_CODING_PLATFORM_API_URL=http://127.0.0.1:4100/v1` 后启动 Web Bundle。知识库默认使用内存文本匹配 fixture，不连接真实 WeKnora；文件导入只接受 JSON 文件名描述，不保存 multipart 字节。服务还不提供生产数据库、OIDC、对象存储、游标分页、FAQ/Wiki/Graph CRUD 或完整审计；生产实现必须以 `docs/服务API-知识库需求文档.md` 为准。
+内存服务由原仓库 `apps/team-skill-service` 启动，默认监听 `http://127.0.0.1:4100`，健康检查为 `/health`。设置 `DSH_AI_CODING_PLATFORM_API_URL=http://127.0.0.1:4100/v1` 后启动 Web Bundle。知识库和项目记忆默认使用内存 fixture，不连接真实 WeKnora 或 MemoryCore；记忆 fixture 覆盖 team + project 隔离、捕获/召回、游标列表/搜索、revision 冲突、幂等、403/503 和删除后不可召回。服务还不提供生产数据库、OIDC、对象存储或完整审计；生产实现必须以服务端需求文档为准。
 
 ## 后端交接清单
 

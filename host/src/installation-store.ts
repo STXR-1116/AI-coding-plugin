@@ -31,10 +31,7 @@ export class TeamSkillInstallationStore {
    */
   async upsert(next: TeamSkillInstallationRecord): Promise<void> {
     const records = await this.list()
-    const updated = [
-      ...records.filter(record => !sameInstallation(record, next)),
-      next,
-    ]
+    const updated = [...records.filter(record => !sameInstallation(record, next)), next]
     await this.write(updated)
   }
 
@@ -65,9 +62,7 @@ export class TeamSkillInstallationStore {
 }
 
 function sameInstallation(left: TeamSkillInstallationRecord, right: TeamSkillInstallationRecord): boolean {
-  return left.skillId === right.skillId
-    && left.scope === right.scope
-    && left.workspaceId === right.workspaceId
+  return left.skillId === right.skillId && left.scope === right.scope && left.workspaceId === right.workspaceId
 }
 
 function parseRecords(source: string): readonly TeamSkillInstallationRecord[] {
@@ -96,17 +91,19 @@ function parseRecord(value: unknown): TeamSkillInstallationRecord {
     skillId: requireString(record.skillId),
     projectId: requireString(record.projectId),
     scope,
-    ...workspaceId === undefined ? {} : { workspaceId },
+    ...(workspaceId === undefined ? {} : { workspaceId }),
     installed: Object.freeze({
       runtimeName: requireString(installed.runtimeName),
       version: requireString(installed.version),
       artifactSha256: requireString(installed.artifactSha256),
       directory: requireString(installed.directory),
-      files: Object.freeze(requireArray(installed.files).map((file) => {
-        const digest = recordOf(file)
-        if (digest === undefined) throw new Error('A local Team Skill file digest is invalid.')
-        return Object.freeze({ path: requireString(digest.path), sha256: requireString(digest.sha256) })
-      })),
+      files: Object.freeze(
+        requireArray(installed.files).map((file) => {
+          const digest = recordOf(file)
+          if (digest === undefined) throw new Error('A local Team Skill file digest is invalid.')
+          return Object.freeze({ path: requireString(digest.path), sha256: requireString(digest.sha256) })
+        }),
+      ),
       state: requireInstalledState(installed.state),
     }),
     installedAt: requireString(record.installedAt),
@@ -114,9 +111,7 @@ function parseRecord(value: unknown): TeamSkillInstallationRecord {
 }
 
 function recordOf(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined
 }
 
 function requireString(value: unknown): string {

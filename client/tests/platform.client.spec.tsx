@@ -8,7 +8,10 @@ import { PlatformEntry } from '../src/client/PlatformEntry.tsx'
 import { PlatformSurface } from '../src/client/PlatformSurface.tsx'
 import { PlatformDemoController } from '../src/client/controller.ts'
 
-afterEach(() =>{  cleanup(); window.localStorage.clear() })
+afterEach(() => {
+  cleanup()
+  window.localStorage.clear()
+})
 
 const copy = {
   'platform.name': '编程协作台',
@@ -23,14 +26,33 @@ const t = (key: string): string => copy[key as keyof typeof copy] ?? key
 
 const demoCatalog = {
   status: 'ready' as const,
-  catalog: { items: [{ skillId: 'skill-review', displayName: '代码评审', runtimeName: 'code-review', summary: '按团队规范检查风险、测试和变更边界。', version: '2.4.0', category: '质量', tags: ['质量'], publishedAt: '2026-08-29T08:00:00Z' }] },
+  catalog: {
+    items: [
+      {
+        skillId: 'skill-review',
+        displayName: '代码评审',
+        runtimeName: 'code-review',
+        summary: '按团队规范检查风险、测试和变更边界。',
+        version: '2.4.0',
+        category: '质量',
+        tags: ['质量'],
+        publishedAt: '2026-08-29T08:00:00Z',
+      },
+    ],
+  },
 }
 
 const demoAccount = {
   status: 'authenticated' as const,
   user: {
-    userId: 'member-1', username: 'member@example.com', email: 'member@example.com',
-    displayName: '成员甲', status: 'active' as const, globalRole: 'member' as const, mustChangePassword: false, revision: 1,
+    userId: 'member-1',
+    username: 'member@example.com',
+    email: 'member@example.com',
+    displayName: '成员甲',
+    status: 'active' as const,
+    globalRole: 'member' as const,
+    mustChangePassword: false,
+    revision: 1,
   },
   memberships: [{ organizationId: 'org-1', organizationName: '星河平台', status: 'active' as const, revision: 1 }],
   mustChangePassword: false,
@@ -38,34 +60,120 @@ const demoAccount = {
 
 const demoOrganizations = [{ organizationId: 'org-1', name: '星河平台', status: 'active' as const, revision: 1 }]
 const demoProject = {
-  projectId: 'orbit-ui', organizationId: 'org-1', organizationName: '星河平台', name: 'AI开放平台', description: 'AI 开放平台项目', status: 'active' as const,
-  createdBy: 'manager-1', createdAt: '2026-08-29T08:00:00Z', updatedAt: '2026-08-29T08:00:00Z', memberCount: 1, assetCount: 1, revision: 1,
+  projectId: 'orbit-ui',
+  organizationId: 'org-1',
+  organizationName: '星河平台',
+  name: 'AI开放平台',
+  description: 'AI 开放平台项目',
+  status: 'active' as const,
+  createdBy: 'manager-1',
+  createdAt: '2026-08-29T08:00:00Z',
+  updatedAt: '2026-08-29T08:00:00Z',
+  memberCount: 1,
+  assetCount: 1,
+  revision: 1,
 }
 const demoProjectDetail = {
   project: demoProject,
-  assets: [{ projectId: 'orbit-ui', assetType: 'skill' as const, assetId: 'skill-review', name: '代码评审', relationKind: 'reference' as const, createdAt: '2026-08-29T08:00:00Z', updatedAt: '2026-08-29T08:00:00Z', revision: 1 }],
+  assets: [
+    {
+      projectId: 'orbit-ui',
+      assetType: 'skill' as const,
+      assetId: 'skill-review',
+      name: '代码评审',
+      relationKind: 'reference' as const,
+      createdAt: '2026-08-29T08:00:00Z',
+      updatedAt: '2026-08-29T08:00:00Z',
+      revision: 1,
+    },
+  ],
 }
 const demoKnowledgeBases = [
-  { knowledgeBaseId: 'k-1', name: 'DSH 会话事件与模型可见性规范', description: '会话日志与模型可见性要求。', type: 'document' as const, state: 'active' as const, searchable: true, updatedAt: '2026-08-29T08:00:00Z', revision: 1 },
-  { knowledgeBaseId: 'k-2', name: '远程执行目标接入手册', description: '远程执行目标的接入约定。', type: 'document' as const, state: 'active' as const, searchable: true, updatedAt: '2026-08-29T08:00:00Z', revision: 1 },
+  {
+    knowledgeBaseId: 'k-1',
+    name: 'DSH 会话事件与模型可见性规范',
+    description: '会话日志与模型可见性要求。',
+    type: 'document' as const,
+    state: 'active' as const,
+    searchable: true,
+    updatedAt: '2026-08-29T08:00:00Z',
+    revision: 1,
+  },
+  {
+    knowledgeBaseId: 'k-2',
+    name: '远程执行目标接入手册',
+    description: '远程执行目标的接入约定。',
+    type: 'document' as const,
+    state: 'active' as const,
+    searchable: true,
+    updatedAt: '2026-08-29T08:00:00Z',
+    revision: 1,
+  },
+]
+const demoMemories = [
+  {
+    memoryId: 'm-1',
+    teamId: 'team-1',
+    projectId: 'orbit-ui',
+    content: '服务端记忆：稳定错误码必须保留。',
+    layer: 'L1' as const,
+    capturedByUserId: 'member-1',
+    createdAt: '2026-08-29T08:00:00Z',
+    updatedAt: '2026-08-29T08:00:00Z',
+    revision: 1,
+    status: 'ACTIVE' as const,
+    importance: 0.9,
+    recallCount: 2,
+    lastRecalledAt: null,
+    sourceKind: 'agent_turn' as const,
+  },
 ]
 const demoAccess = {
   organizations: demoOrganizations,
   projects: [demoProject],
   assets: [
-    { assetId: 'orbit-ui', assetType: 'project' as const, name: 'AI开放平台', visibility: 'project' as const, organizationId: 'org-1', projectId: 'orbit-ui' },
-    { assetId: 'skill-review', assetType: 'skill' as const, name: '代码评审', visibility: 'project' as const, organizationId: 'org-1', projectId: 'orbit-ui' },
+    {
+      assetId: 'orbit-ui',
+      assetType: 'project' as const,
+      name: 'AI开放平台',
+      visibility: 'project' as const,
+      organizationId: 'org-1',
+      projectId: 'orbit-ui',
+    },
+    {
+      assetId: 'skill-review',
+      assetType: 'skill' as const,
+      name: '代码评审',
+      visibility: 'project' as const,
+      organizationId: 'org-1',
+      projectId: 'orbit-ui',
+    },
     { assetId: 'k-1', assetType: 'knowledge' as const, name: 'DSH 规范', visibility: 'organization' as const, organizationId: 'org-1' },
     { assetId: 'k-2', assetType: 'knowledge' as const, name: '接入手册', visibility: 'organization' as const, organizationId: 'org-1' },
     { assetId: 'm-1', assetType: 'memory' as const, name: '稳定错误码', visibility: 'organization' as const, organizationId: 'org-1' },
     { assetId: 'm-4', assetType: 'memory' as const, name: '采集失败不阻塞', visibility: 'organization' as const, organizationId: 'org-1' },
   ],
-  management: { organizationIds: [], projectIds: [] }, revision: 1,
+  management: { organizationIds: [], projectIds: [] },
+  revision: 1,
 }
 
 const demoWorkspaceState: WorkspaceListState = {
-  items: [{ workspaceId: 'ws-1' as WorkspaceId, title: 'AI开放平台', path: 'hidden', sessionIds: [], createdAt: '2026-08-29T08:00:00Z', updatedAt: '2026-08-29T08:00:00Z' }],
-  archivedSessionIds: [], state: 'idle', phase: 'ready', error: null, baselinesReady: true, recentWorkspaceId: 'ws-1' as WorkspaceId,
+  items: [
+    {
+      workspaceId: 'ws-1' as WorkspaceId,
+      title: 'AI开放平台',
+      path: 'hidden',
+      sessionIds: [],
+      createdAt: '2026-08-29T08:00:00Z',
+      updatedAt: '2026-08-29T08:00:00Z',
+    },
+  ],
+  archivedSessionIds: [],
+  state: 'idle',
+  phase: 'ready',
+  error: null,
+  baselinesReady: true,
+  recentWorkspaceId: 'ws-1' as WorkspaceId,
 }
 
 const demoSessionState = { current: 'session-1', byId: { 'session-1': { blank: false } } }
@@ -82,8 +190,35 @@ function demoRemote(): ClientRemote {
       projects: vi.fn(async () => ({ ok: true, value: [demoProject] })),
       project: vi.fn(async () => ({ ok: true, value: demoProjectDetail })),
       knowledgeBases: vi.fn(async () => ({ ok: true, value: demoKnowledgeBases })),
-      knowledgeSearch: vi.fn(async () => ({ ok: true, value: { status: 'ready' as const, response: { requestId: 'req-1', results: [], knowledgeBases: [] } } })),
-      knowledgePreview: vi.fn(async () => ({ ok: true, value: { knowledgeBaseId: 'k-1', documentId: 'doc-1', title: '预览', previewUrl: 'https://service.test/preview/doc-1' } })),
+      knowledgeSearch: vi.fn(async () => ({
+        ok: true,
+        value: { status: 'ready' as const, response: { requestId: 'req-1', results: [], knowledgeBases: [] } },
+      })),
+      knowledgePreview: vi.fn(async () => ({
+        ok: true,
+        value: { knowledgeBaseId: 'k-1', documentId: 'doc-1', title: '预览', previewUrl: 'https://service.test/preview/doc-1' },
+      })),
+      memoryList: vi.fn(async () => ({ ok: true, value: { items: demoMemories, nextCursor: null, totalEstimate: 1 } })),
+      memoryGet: vi.fn(async () => ({ ok: true, value: demoMemories[0] })),
+      memoryUpdate: vi.fn(async ({ memoryId, content, expectedRevision }: {
+        memoryId: string
+        content: string
+        expectedRevision: number
+      }) => ({
+        ok: true,
+        value: {
+          status: 'INDEX_PENDING' as const,
+          eventId: 'e-update',
+          jobId: 'j-update',
+          memory: { ...demoMemories[0], memoryId, content, revision: expectedRevision + 1 },
+        },
+      })),
+      memoryDelete: vi.fn(async () => ({
+        ok: true,
+        value: { status: 'PENDING' as const, eventId: 'e-delete', jobId: 'j-delete', cleanupStatus: 'PENDING' as const },
+      })),
+      configureProjectMemory: vi.fn(async () => ({ ok: true as const, value: undefined })),
+      clearProjectMemory: vi.fn(async () => ({ ok: true as const, value: undefined })),
       configureKnowledgeSelection: vi.fn(async () => ({ ok: true as const, value: undefined })),
       clearKnowledgeSelection: vi.fn(async () => ({ ok: true as const, value: undefined })),
       accessSummary: vi.fn(async () => ({ ok: true, value: demoAccess })),
@@ -91,7 +226,24 @@ function demoRemote(): ClientRemote {
       installations: vi.fn(async () => ({ ok: true, value: [] })),
       syncReleaseStatus: vi.fn(async () => ({ ok: true, value: [] })),
       uninstallSkill: vi.fn(async () => ({ ok: true, value: [] })),
-      installSkill: vi.fn(async () => ({ ok: true, value: { status: 'succeeded', installation: { localInstallationId: 'local-1', skillId: 'skill-review', projectId: 'orbit-ui', scope: 'project', workspaceId: 'ws-1', runtimeName: 'code-review', version: '2.4.0', artifactSha256: 'abc', state: 'normal', installedAt: '2026-08-29T08:00:00Z' } } })),
+      installSkill: vi.fn(async () => ({
+        ok: true,
+        value: {
+          status: 'succeeded',
+          installation: {
+            localInstallationId: 'local-1',
+            skillId: 'skill-review',
+            projectId: 'orbit-ui',
+            scope: 'project',
+            workspaceId: 'ws-1',
+            runtimeName: 'code-review',
+            version: '2.4.0',
+            artifactSha256: 'abc',
+            state: 'normal',
+            installedAt: '2026-08-29T08:00:00Z',
+          },
+        },
+      })),
     },
   } as unknown as ClientRemote
 }
@@ -121,20 +273,28 @@ it('binds selected knowledge bases to the current native DSH session and clears 
 
   expect(await screen.findByRole('heading', { name: '从权限范围内的资产开始协作' })).toBeTruthy()
   fireEvent.change(screen.getByLabelText('当前项目'), { target: { value: 'orbit-ui' } })
-  await waitFor(() => expect(screen.getByLabelText('当前项目')).toHaveProperty('value', 'orbit-ui'))
+  await waitFor(() => {
+    expect(screen.getByLabelText('当前项目')).toHaveProperty('value', 'orbit-ui')
+  })
   fireEvent.click(within(screen.getByRole('navigation', { name: '平台模块' })).getByRole('button', { name: '知识库' }))
   await screen.findByText('DSH 会话事件与模型可见性规范')
   const knowledgeRow = screen.getByText('DSH 会话事件与模型可见性规范').closest('label')
   if (knowledgeRow === null) throw new Error('knowledge row not found')
-  fireEvent.click(knowledgeRow.querySelector('input'))
+  const knowledgeInput = knowledgeRow.querySelector('input')
+  if (knowledgeInput === null) throw new Error('knowledge input not found')
+  fireEvent.click(knowledgeInput)
 
-  await waitFor(() => expect(remote.teamSkills.configureKnowledgeSelection).toHaveBeenCalledWith('session-1', {
-    projectId: 'orbit-ui',
-    knowledgeBaseIds: ['k-1'],
-  }))
+  await waitFor(() => {
+    expect(remote.teamSkills.configureKnowledgeSelection).toHaveBeenCalledWith('session-1', {
+      projectId: 'orbit-ui',
+      knowledgeBaseIds: ['k-1'],
+    })
+  })
 
   fireEvent.change(screen.getByLabelText('当前项目'), { target: { value: '' } })
-  await waitFor(() => expect(remote.teamSkills.clearKnowledgeSelection).toHaveBeenCalledWith('session-1'))
+  await waitFor(() => {
+    expect(remote.teamSkills.clearKnowledgeSelection).toHaveBeenCalledWith('session-1')
+  })
 })
 
 it('shows a configure rejection and does not retain a local knowledge binding', async () => {
@@ -149,15 +309,21 @@ it('shows a configure rejection and does not retain a local knowledge binding', 
 
   expect(await screen.findByRole('heading', { name: '从权限范围内的资产开始协作' })).toBeTruthy()
   fireEvent.change(screen.getByLabelText('当前项目'), { target: { value: 'orbit-ui' } })
-  await waitFor(() => expect(screen.getByLabelText('当前项目')).toHaveProperty('value', 'orbit-ui'))
+  await waitFor(() => {
+    expect(screen.getByLabelText('当前项目')).toHaveProperty('value', 'orbit-ui')
+  })
   fireEvent.click(within(screen.getByRole('navigation', { name: '平台模块' })).getByRole('button', { name: '知识库' }))
   const knowledgeRow = (await screen.findByText('DSH 会话事件与模型可见性规范')).closest('label')
   if (knowledgeRow === null) throw new Error('knowledge row not found')
-  fireEvent.click(knowledgeRow.querySelector('input'))
+  const knowledgeInput = knowledgeRow.querySelector('input')
+  if (knowledgeInput === null) throw new Error('knowledge input not found')
+  fireEvent.click(knowledgeInput)
 
   expect((await screen.findByRole('alert')).textContent).toContain('当前 DSH 会话已结束。')
   fireEvent.change(screen.getByLabelText('当前项目'), { target: { value: '' } })
-  await waitFor(() => expect(remote.teamSkills.clearKnowledgeSelection).not.toHaveBeenCalled())
+  await waitFor(() => {
+    expect(remote.teamSkills.clearKnowledgeSelection).not.toHaveBeenCalled()
+  })
 })
 
 it('shows a clear rejection without attempting a new local binding', async () => {
@@ -172,12 +338,18 @@ it('shows a clear rejection without attempting a new local binding', async () =>
 
   expect(await screen.findByRole('heading', { name: '从权限范围内的资产开始协作' })).toBeTruthy()
   fireEvent.change(screen.getByLabelText('当前项目'), { target: { value: 'orbit-ui' } })
-  await waitFor(() => expect(screen.getByLabelText('当前项目')).toHaveProperty('value', 'orbit-ui'))
+  await waitFor(() => {
+    expect(screen.getByLabelText('当前项目')).toHaveProperty('value', 'orbit-ui')
+  })
   fireEvent.click(within(screen.getByRole('navigation', { name: '平台模块' })).getByRole('button', { name: '知识库' }))
   const knowledgeRow = (await screen.findByText('DSH 会话事件与模型可见性规范')).closest('label')
   if (knowledgeRow === null) throw new Error('knowledge row not found')
-  fireEvent.click(knowledgeRow.querySelector('input'))
-  await waitFor(() => expect(remote.teamSkills.configureKnowledgeSelection).toHaveBeenCalled())
+  const knowledgeInput = knowledgeRow.querySelector('input')
+  if (knowledgeInput === null) throw new Error('knowledge input not found')
+  fireEvent.click(knowledgeInput)
+  await waitFor(() => {
+    expect(remote.teamSkills.configureKnowledgeSelection).toHaveBeenCalled()
+  })
 
   fireEvent.change(screen.getByLabelText('当前项目'), { target: { value: '' } })
   expect((await screen.findByRole('alert')).textContent).toContain('当前 DSH 会话已结束。')
@@ -210,7 +382,9 @@ describe('AI Coding platform demo', () => {
 
   it('shows an explicit service error when access loading rejects', async () => {
     const remote = demoRemote()
-    remote.teamSkills.projects = vi.fn(async () => { throw new Error('项目访问接口未装配') })
+    remote.teamSkills.projects = vi.fn(async () => {
+      throw new Error('项目访问接口未装配')
+    })
     const controller = new PlatformDemoController()
     controller.open()
     mountSurface(controller, remote)
@@ -221,7 +395,9 @@ describe('AI Coding platform demo', () => {
 
   it('opens from the sidebar entry and closes from the overlay', () => {
     const controller = new PlatformDemoController()
-    const onOpen = () =>{  controller.open(); }
+    const onOpen = () => {
+      controller.open()
+    }
     const entryProps = {
       wide: true,
       onOpen,
@@ -255,7 +431,9 @@ describe('AI Coding platform demo', () => {
     fireEvent.click(within(nav).getByRole('button', { name: '团队 Skill' }))
     expect(await screen.findByRole('heading', { name: '选择项目后查看 Skill' })).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'AI开放平台' }))
-    await waitFor(() =>{  expect(screen.getByRole('heading', { name: '把已发布能力安装到本地 DSH' })).toBeTruthy(); })
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: '把已发布能力安装到本地 DSH' })).toBeTruthy()
+    })
     fireEvent.click(screen.getByRole('button', { name: '安装 Skill' }))
     fireEvent.click(screen.getByRole('button', { name: '确认安装到当前项目' }))
     expect(await screen.findByText('已安装到当前项目')).toBeTruthy()
@@ -264,8 +442,7 @@ describe('AI Coding platform demo', () => {
     expect(await screen.findByText('远程执行目标接入手册')).toBeTruthy()
 
     fireEvent.click(within(nav).getByRole('button', { name: '记忆库' }))
-    fireEvent.click(screen.getByRole('button', { name: /^团队$/ }))
-    expect(screen.getByText('2 条')).toBeTruthy()
+    expect((await screen.findAllByText('服务端记忆：稳定错误码必须保留。')).length).toBeGreaterThan(0)
 
     fireEvent.click(within(nav).getByRole('button', { name: '数据采集' }))
     fireEvent.click(screen.getByRole('button', { name: '暂停采集' }))
@@ -294,14 +471,15 @@ describe('AI Coding platform demo', () => {
     expect(await screen.findByRole('heading', { name: '从权限范围内的资产开始协作' })).toBeTruthy()
     const nav = screen.getByRole('navigation', { name: '平台模块' })
     fireEvent.change(screen.getByLabelText('当前项目'), { target: { value: 'orbit-ui' } })
-    await waitFor(() => expect(screen.getByLabelText('当前项目')).toHaveProperty('value', 'orbit-ui'))
+    await waitFor(() => {
+      expect(screen.getByLabelText('当前项目')).toHaveProperty('value', 'orbit-ui')
+    })
     fireEvent.click(within(nav).getByRole('button', { name: '知识库' }))
     expect(screen.getByText('DSH 会话事件与模型可见性规范')).toBeTruthy()
     expect(screen.queryByText('前端组件可访问性基线')).toBeNull()
 
     fireEvent.click(within(nav).getByRole('button', { name: '记忆库' }))
-    expect(screen.getByText('运行时错误必须保留稳定错误码')).toBeTruthy()
-    expect(screen.queryByText('AI开放平台的弹窗统一使用 12px 圆角')).toBeNull()
+    expect((await screen.findAllByText('服务端记忆：稳定错误码必须保留。')).length).toBeGreaterThan(0)
   })
 
   it('does not render a Team Skill outside the selected project access summary', async () => {
@@ -313,7 +491,16 @@ describe('AI Coding platform demo', () => {
         catalog: {
           items: [
             ...demoCatalog.catalog.items,
-            { skillId: 'restricted-skill', displayName: '受限 Skill', runtimeName: 'restricted-skill', summary: '不应向当前项目显示。', version: '1.0.0', category: '质量', tags: ['受限'], publishedAt: '2026-08-30T00:00:00Z' },
+            {
+              skillId: 'restricted-skill',
+              displayName: '受限 Skill',
+              runtimeName: 'restricted-skill',
+              summary: '不应向当前项目显示。',
+              version: '1.0.0',
+              category: '质量',
+              tags: ['受限'],
+              publishedAt: '2026-08-30T00:00:00Z',
+            },
           ],
         },
       },
@@ -339,13 +526,16 @@ describe('AI Coding platform demo', () => {
         ok: false as const,
         error: { code, message: '当前项目授权已变更。', details: {} },
       }))
-      remote.teamSkills.accessSummary = vi.fn()
+      remote.teamSkills.accessSummary = vi
+        .fn()
         .mockResolvedValueOnce({ ok: true, value: demoAccess })
         .mockResolvedValueOnce({
           ok: true,
           value: { ...demoAccess, projects: [], assets: [] },
-        }).mockResolvedValue({ ok: true, value: { ...demoAccess, projects: [], assets: [] } })
-      remote.teamSkills.projects = vi.fn()
+        })
+        .mockResolvedValue({ ok: true, value: { ...demoAccess, projects: [], assets: [] } })
+      remote.teamSkills.projects = vi
+        .fn()
         .mockResolvedValueOnce({ ok: true, value: [demoProject] })
         .mockResolvedValue({ ok: true, value: [] })
       const controller = new PlatformDemoController()
@@ -377,7 +567,8 @@ describe('AI Coding platform demo', () => {
 
   it('keeps the selected project while a detail refresh fails', async () => {
     const remote = demoRemote()
-    remote.teamSkills.project = vi.fn()
+    remote.teamSkills.project = vi
+      .fn()
       .mockResolvedValueOnce({ ok: true as const, value: demoProjectDetail })
       .mockResolvedValueOnce({ ok: false as const, error: { code: 'NETWORK_ERROR', message: '服务暂时不可用', details: {} } })
     const controller = new PlatformDemoController()
@@ -385,12 +576,83 @@ describe('AI Coding platform demo', () => {
     mountSurface(controller, remote)
     expect(await screen.findByRole('heading', { name: '从权限范围内的资产开始协作' })).toBeTruthy()
     fireEvent.change(screen.getByLabelText('当前项目'), { target: { value: 'orbit-ui' } })
-    await waitFor(() =>{ expect(screen.getByLabelText('当前项目')).toHaveProperty('value', 'orbit-ui') })
+    await waitFor(() => {
+      expect(screen.getByLabelText('当前项目')).toHaveProperty('value', 'orbit-ui')
+    })
     fireEvent.click(screen.getByRole('button', { name: '项目' }))
     const projectSelect = screen.getByRole('combobox', { name: '查看项目' })
     fireEvent.change(projectSelect, { target: { value: 'orbit-ui' } })
-    await waitFor(() =>{ expect(screen.getByLabelText('当前项目')).toHaveProperty('value', 'orbit-ui') })
+    await waitFor(() => {
+      expect(screen.getByLabelText('当前项目')).toHaveProperty('value', 'orbit-ui')
+    })
     expect(screen.queryByText('代码评审')).toBeNull()
     expect(screen.getByText('服务暂时不可用')).toBeTruthy()
   })
+})
+
+it('loads project memories from the service and updates them with the server revision', async () => {
+  const controller = new PlatformDemoController()
+  controller.open()
+  const remote = demoRemote()
+  mountSurface(controller, remote)
+  expect(await screen.findByRole('heading', { name: '从权限范围内的资产开始协作' })).toBeTruthy()
+  fireEvent.change(screen.getByLabelText('当前项目'), { target: { value: 'orbit-ui' } })
+  await waitFor(() => {
+    expect(screen.getByLabelText('当前项目')).toHaveProperty('value', 'orbit-ui')
+  })
+  fireEvent.click(within(screen.getByRole('navigation', { name: '平台模块' })).getByRole('button', { name: '记忆库' }))
+  expect((await screen.findAllByText('服务端记忆：稳定错误码必须保留。')).length).toBeGreaterThan(0)
+  fireEvent.click(screen.getByRole('button', { name: /服务端记忆：稳定错误码必须保留。/ }))
+  fireEvent.click(screen.getByRole('button', { name: '编辑记忆' }))
+  const editor = screen.getByRole('textbox', { name: '记忆正文' })
+  fireEvent.change(editor, { target: { value: '服务端记忆已更新。' } })
+  fireEvent.click(screen.getByRole('button', { name: '保存记忆' }))
+  await waitFor(() => {
+    expect(remote.teamSkills.memoryUpdate).toHaveBeenCalledWith({ memoryId: 'm-1', content: '服务端记忆已更新。', expectedRevision: 1 })
+  })
+})
+
+it('searches project memories through the service and appends the next cursor page', async () => {
+  const firstMemory = demoMemories[0]!
+  const secondMemory = { ...firstMemory, memoryId: 'm-2', content: '游标页记忆：搜索结果必须来自服务端。' }
+  const remote = demoRemote()
+  remote.teamSkills.memoryList = vi.fn(async ({ keyword, cursor }: { keyword?: string; cursor?: string }) => {
+    if (cursor === 'cursor-1') {
+      return {
+        ok: true as const,
+        value: { items: [firstMemory], nextCursor: null, totalEstimate: 2 },
+      }
+    }
+    if (keyword === '游标') {
+      return {
+        ok: true as const,
+        value: { items: [secondMemory], nextCursor: 'cursor-1', totalEstimate: 2 },
+      }
+    }
+    return { ok: true as const, value: { items: demoMemories, nextCursor: null, totalEstimate: 1 } }
+  })
+  const controller = new PlatformDemoController()
+  controller.open()
+  mountSurface(controller, remote)
+  expect(await screen.findByRole('heading', { name: '从权限范围内的资产开始协作' })).toBeTruthy()
+  fireEvent.change(screen.getByLabelText('当前项目'), { target: { value: 'orbit-ui' } })
+  await waitFor(() => {
+    expect(screen.getByLabelText('当前项目')).toHaveProperty('value', 'orbit-ui')
+  })
+  fireEvent.click(within(screen.getByRole('navigation', { name: '平台模块' })).getByRole('button', { name: '记忆库' }))
+  expect((await screen.findAllByText('服务端记忆：稳定错误码必须保留。')).length).toBeGreaterThan(0)
+
+  fireEvent.change(screen.getByRole('searchbox', { name: '搜索记忆' }), { target: { value: '游标' } })
+  fireEvent.click(screen.getByRole('button', { name: '搜索记忆' }))
+  await waitFor(() => {
+    expect(remote.teamSkills.memoryList).toHaveBeenLastCalledWith({ projectId: 'orbit-ui', keyword: '游标', limit: 50 })
+  })
+  expect((await screen.findAllByText('游标页记忆：搜索结果必须来自服务端。')).length).toBeGreaterThan(0)
+
+  fireEvent.click(screen.getByRole('button', { name: '加载更多记忆' }))
+  await waitFor(() => {
+    expect(remote.teamSkills.memoryList).toHaveBeenLastCalledWith({ projectId: 'orbit-ui', keyword: '游标', cursor: 'cursor-1', limit: 50 })
+  })
+  expect((await screen.findAllByText('游标页记忆：搜索结果必须来自服务端。')).length).toBeGreaterThan(0)
+  expect((await screen.findAllByText('服务端记忆：稳定错误码必须保留。')).length).toBeGreaterThan(0)
 })

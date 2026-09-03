@@ -552,6 +552,58 @@
   background: var(--platform-panel);
 }
 
+.memoryLayout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, .65fr);
+  gap: 16px;
+}
+
+.memoryAside {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--platform-border);
+  border-radius: 7px;
+  background: var(--platform-panel);
+}
+
+.memoryRowActive {
+  border-color: var(--platform-accent);
+  background: var(--platform-panel-raised);
+}
+
+.memoryDetail {
+  white-space: pre-wrap;
+  line-height: 1.7;
+}
+
+.memoryEditor {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0;
+  font-weight: 600;
+}
+
+.memoryEditor textarea {
+  width: 100%;
+  min-height: 160px;
+  resize: vertical;
+  border: 1px solid var(--platform-border);
+  padding: 10px;
+  font: inherit;
+}
+
+.dangerButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid rgba(224, 112, 112, 0.5);
+  border-radius: 5px;
+  padding: 8px 11px;
+  background: transparent;
+  color: #e07a7a;
+  cursor: pointer;
+}
+
 .panel {
   padding: 20px;
 }
@@ -895,6 +947,31 @@
 
 .searchBox:focus-within {
   border-color: var(--platform-accent);
+}
+
+.memoryActions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.memoryActions .searchBox {
+  width: min(250px, 100%);
+}
+
+.memoryActions .searchBox button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--platform-text-muted);
+  cursor: pointer;
+}
+
+.memoryActions .searchBox button:hover {
+  color: var(--platform-accent-strong);
 }
 
 .selectBox {
@@ -2208,8 +2285,14 @@
 
   .pageAction,
   .pageAction .searchBox,
-  .pageAction .segmented {
+  .pageAction .segmented,
+  .pageAction .memoryActions {
     width: 100%;
+  }
+
+  .pageAction .memoryActions .searchBox {
+    flex: 1;
+    width: auto;
   }
 
   .pageAction .outlineButton {

@@ -231,6 +231,90 @@ export interface TeamSkillKnowledgePreview {
   readonly previewUrl: string
 }
 
+/** Service-authoritative project memory record visible to the current caller. */
+export interface TeamSkillMemory {
+  readonly memoryId: string
+  readonly teamId: string
+  readonly projectId: string
+  readonly content: string
+  readonly layer: 'L1'
+  readonly capturedByUserId: string
+  readonly createdAt: string
+  readonly updatedAt: string
+  readonly revision: number
+  readonly status: 'ACTIVE' | 'DELETED'
+  readonly importance: number
+  readonly recallCount: number
+  readonly lastRecalledAt: string | null
+  readonly sourceKind: 'agent_turn'
+}
+
+/** Search result returned by project-memory recall. */
+export interface TeamSkillMemoryRecallItem {
+  readonly memoryId: string
+  readonly content: string
+  readonly score: number
+  readonly layer: 'L1'
+}
+
+/** Server state for one project-memory recall request. */
+export type TeamSkillMemoryRecallStatus = 'READY' | 'PARTIAL' | 'UNAVAILABLE' | 'PROJECT_REQUIRED'
+
+/** Project-memory recall response; failure states are not empty success responses. */
+export interface TeamSkillMemoryRecallResponse {
+  readonly status: TeamSkillMemoryRecallStatus
+  readonly items: readonly TeamSkillMemoryRecallItem[]
+  readonly contextText: string
+  readonly strategy: string
+  readonly effectivePolicy: { readonly topK: number; readonly relevanceThreshold: number; readonly tokenBudget: number }
+}
+
+/** Cursor page for project-memory list and search. */
+export interface TeamSkillMemoryPage {
+  readonly items: readonly TeamSkillMemory[]
+  readonly nextCursor: string | null
+  readonly totalEstimate: number
+}
+
+/** Accepted asynchronous memory mutation. */
+export interface TeamSkillMemoryMutation {
+  readonly memory?: TeamSkillMemory
+  readonly eventId: string
+  readonly jobId: string
+  readonly status: 'PENDING' | 'INDEX_PENDING'
+  readonly acceptedCount?: number
+  readonly cleanupStatus?: 'PENDING' | 'FAILED'
+}
+
+/** Project-memory job visible to the current caller. */
+export interface TeamSkillMemoryJob {
+  readonly jobId: string
+  readonly eventId: string
+  readonly kind: 'CAPTURE' | 'INDEX_REFRESH' | 'DELETE_CLEANUP' | 'SCOPE_MOVED'
+  readonly teamId: string
+  readonly projectId: string
+  readonly requestedByUserId: string
+  readonly status: 'PENDING' | 'SUCCEEDED' | 'FAILED'
+  readonly retryable: boolean
+  readonly retryCount: number
+  readonly createdAt: string
+  readonly finishedAt: string | null
+  readonly errorCode: string | null
+  readonly revision: number
+}
+
+/** Project-memory audit record without source transcript content. */
+export interface TeamSkillMemoryAudit {
+  readonly auditId: string
+  readonly operation: string
+  readonly operatedByUserId: string
+  readonly role: TeamSkillAccountRole
+  readonly memoryId: string | null
+  readonly projectId: string
+  readonly result: string
+  readonly eventId: string
+}
+
 /** Server-controlled publication state of a Team Skill version. */
 export type TeamSkillReleaseState = 'published' | 'withdrawn'
 
@@ -375,14 +459,7 @@ export interface TeamSkillInstallationView {
 }
 
 /** Action stage carried to the service audit trail without local paths. */
-export type TeamSkillOperationStatus =
-  | 'downloading'
-  | 'verifying'
-  | 'writing'
-  | 'refreshing'
-  | 'succeeded'
-  | 'failed'
-  | 'cancelled'
+export type TeamSkillOperationStatus = 'downloading' | 'verifying' | 'writing' | 'refreshing' | 'succeeded' | 'failed' | 'cancelled'
 
 /** User-displayable Host status when service configuration is incomplete. */
 export interface TeamSkillNotReady {
@@ -401,10 +478,7 @@ export interface TeamSkillFailed {
 }
 
 /** Result of a Team Skill catalog request. */
-export type TeamSkillCatalogResult =
-  | { readonly status: 'ready'; readonly catalog: TeamSkillCatalog }
-  | TeamSkillNotReady
-  | TeamSkillFailed
+export type TeamSkillCatalogResult = { readonly status: 'ready'; readonly catalog: TeamSkillCatalog } | TeamSkillNotReady | TeamSkillFailed
 
 /** Result of an installation request. */
 export type TeamSkillInstallResult =

@@ -6,6 +6,7 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { describe, expect, it } from 'vitest'
+/* oxlint-disable typescript/no-unsafe-assignment -- Vitest asymmetric matchers are typed as any. */
 import { TeamSkillKnowledgeLoop } from '../src/knowledge-loop.ts'
 import type { TeamSkillKnowledgeSearchResponse } from '../src/types.ts'
 import { MockAdapter, textResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
@@ -23,9 +24,12 @@ async function harness() {
 }
 
 function waitForIdle(ctx: Context, agent: Agent): Promise<void> {
-  return new Promise(resolve => {
+  return new Promise((resolve) => {
     const dispose = ctx.on('agent/status', ({ agent: subject, status }) => {
-      if (subject === agent && status === 'idle') { dispose(); resolve() }
+      if (subject === agent && status === 'idle') {
+        dispose()
+        resolve()
+      }
     })
   })
 }
@@ -36,7 +40,17 @@ function ask(agent: Agent, text: string): void {
 
 const usedResponse: TeamSkillKnowledgeSearchResponse = {
   requestId: 'req-1',
-  results: [{ knowledgeBaseId: 'k-1', knowledgeId: 'doc-1', title: '发布流程', snippet: '先提交审核', score: 0.9, sourceUrl: '/preview/doc-1', citation: { page: 1 } }],
+  results: [
+    {
+      knowledgeBaseId: 'k-1',
+      knowledgeId: 'doc-1',
+      title: '发布流程',
+      snippet: '先提交审核',
+      score: 0.9,
+      sourceUrl: '/preview/doc-1',
+      citation: { page: 1 },
+    },
+  ],
   knowledgeBases: [{ knowledgeBaseId: 'k-1', status: 'used', reason: null }],
 }
 
@@ -46,8 +60,11 @@ describe('TeamSkillKnowledgeLoop', () => {
     const calls: Array<{ query: string; signal: AbortSignal }> = []
     const agent = ctx.agentLoop.create(SessionId('knowledge-loop'), { provider: 'mock', model: 'mock' })
     const loop = new TeamSkillKnowledgeLoop(ctx, {
-      resolveSelection: subject => subject === agent ? { projectId: 'project-alpha', knowledgeBaseIds: ['k-1'] } : undefined,
-      search: async (request, signal) => { calls.push({ query: request.query, signal }); return { status: 'ready', response: usedResponse } },
+      resolveSelection: subject => (subject === agent ? { projectId: 'project-alpha', knowledgeBaseIds: ['k-1'] } : undefined),
+      search: async (request, signal) => {
+        calls.push({ query: request.query, signal })
+        return { status: 'ready', response: usedResponse }
+      },
     })
 
     ask(agent, '如何发布？')
@@ -55,24 +72,35 @@ describe('TeamSkillKnowledgeLoop', () => {
 
     expect(calls).toHaveLength(1)
     expect(calls[0]?.query).toBe('如何发布？')
-    expect(agent.session.events).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'knowledge-search', data: expect.objectContaining({ requestId: 'req-1', knowledgeBaseIds: ['k-1'] }) }),
-      expect.objectContaining({ type: 'user/message', data: expect.objectContaining({ source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-ai-coding-platform', form: 'recall' } }) }),
-    ]))
+    expect(agent.session.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'knowledge-search',
+          data: expect.objectContaining({ requestId: 'req-1', knowledgeBaseIds: ['k-1'] }),
+        }),
+        expect.objectContaining({
+          type: 'user/message',
+          data: expect.objectContaining({ source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-ai-coding-platform', form: 'recall' } }),
+        }),
+      ]),
+    )
     loop.dispose()
   })
 
   it('rejects the model request when every selected knowledge base is skipped', async () => {
     const skipped: TeamSkillKnowledgeSearchResponse = {
-      requestId: 'req-2', results: [],
+      requestId: 'req-2',
+      results: [],
       knowledgeBases: [{ knowledgeBaseId: 'k-1', status: 'skipped', reason: 'unavailable' }],
     }
     const ctx = await harness()
     let modelRequests = 0
-    ctx.llm.stream = (async function* () { modelRequests += 1 }) as never
+    ctx.llm.stream = async function* () {
+      modelRequests += 1
+    } as never
     const agent = ctx.agentLoop.create(SessionId('knowledge-block'), { provider: 'mock', model: 'mock' })
     const loop = new TeamSkillKnowledgeLoop(ctx, {
-      resolveSelection: subject => subject === agent ? { projectId: 'project-alpha', knowledgeBaseIds: ['k-1'] } : undefined,
+      resolveSelection: subject => (subject === agent ? { projectId: 'project-alpha', knowledgeBaseIds: ['k-1'] } : undefined),
       search: async () => ({ status: 'ready', response: skipped }),
     })
 
@@ -90,8 +118,11 @@ describe('TeamSkillKnowledgeLoop', () => {
     const release = Promise.withResolvers<never>()
     const agent = ctx.agentLoop.create(SessionId('knowledge-abort'), { provider: 'mock', model: 'mock' })
     const loop = new TeamSkillKnowledgeLoop(ctx, {
-      resolveSelection: subject => subject === agent ? { projectId: 'project-alpha', knowledgeBaseIds: ['k-1'] } : undefined,
-      search: async (_request, signal) => { started.resolve(signal); return release.promise },
+      resolveSelection: subject => (subject === agent ? { projectId: 'project-alpha', knowledgeBaseIds: ['k-1'] } : undefined),
+      search: async (_request, signal) => {
+        started.resolve(signal)
+        return release.promise
+      },
     })
 
     ask(agent, '等待检索')
