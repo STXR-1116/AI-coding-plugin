@@ -84,7 +84,6 @@ describe('TeamSkillsView', () => {
         environment={environment}
         projectId="project-alpha"
         projects={[]}
-        visibleSkillIds={['skill-review']}
       />,
     )
 
@@ -129,7 +128,6 @@ describe('TeamSkillsView', () => {
         environment={environment}
         projectId="project-alpha"
         projects={[]}
-        visibleSkillIds={['skill-review']}
       />,
     )
     await waitFor(() => screen.getByRole('heading', { name: '代码评审' }))
@@ -163,7 +161,6 @@ describe('TeamSkillsView', () => {
         environment={environment}
         projectId="project-alpha"
         projects={[]}
-        visibleSkillIds={['skill-review']}
       />,
     )
     await waitFor(() => screen.getByRole('heading', { name: '代码评审' }))
@@ -184,7 +181,6 @@ describe('TeamSkillsView', () => {
         environment={environment}
         projectId="project-alpha"
         projects={[]}
-        visibleSkillIds={['skill-review']}
       />,
     )
     expect(await screen.findByRole('heading', { name: '团队 Skill 暂不可用' })).toBeTruthy()
@@ -204,7 +200,6 @@ describe('TeamSkillsView', () => {
         environment={environment}
         projectId="project-alpha"
         projects={[]}
-        visibleSkillIds={['skill-review']}
         onAuthorizationFailure={refreshAuthorization}
       />,
     )
@@ -226,7 +221,6 @@ describe('TeamSkillsView', () => {
         environment={environment}
         projectId="project-alpha"
         projects={[]}
-        visibleSkillIds={['skill-review']}
         onAuthorizationFailure={refreshAuthorization}
       />,
     )

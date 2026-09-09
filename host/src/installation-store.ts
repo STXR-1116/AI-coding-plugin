@@ -3,12 +3,20 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { withFileLock } from '@deepseek-ai/dsh-atomic-write'
 import type { TeamSkillInstallationRecord, TeamSkillScope } from './types.ts'
 
 const STATE_FILE = 'team-skill-installations.json'
 
+/** Durable installation-store operations consumed by the Host state machine. */
+export interface TeamSkillInstallationStoreLike {
+  list(): Promise<readonly TeamSkillInstallationRecord[]>
+  upsert(next: TeamSkillInstallationRecord): Promise<void>
+  remove(localInstallationId: string): Promise<void>
+}
+
 /** Read and atomically update Host-only Team Skill installation records. */
-export class TeamSkillInstallationStore {
+export class TeamSkillInstallationStore implements TeamSkillInstallationStoreLike {
   constructor(private readonly stateDirectory: string) {}
 
   /** Read every durable installation record owned by this Host.
@@ -26,21 +34,33 @@ export class TeamSkillInstallationStore {
     return parseRecords(source)
   }
 
-  /** Replace the record for one exact local installation scope.
+  /** Replace the record for one exact project authorization scope.
+   * The record identity is `(skillId, scope, workspaceId, projectId)`: two projects never
+   * overwrite each other's authorization record for the same local Skill copy scope.
    * @param next - New record for the local installation scope.
    */
   async upsert(next: TeamSkillInstallationRecord): Promise<void> {
-    const records = await this.list()
-    const updated = [...records.filter(record => !sameInstallation(record, next)), next]
-    await this.write(updated)
+    await this.withLock(async () => {
+      const records = await this.list()
+      const updated = [...records.filter(record => !sameInstallation(record, next)), next]
+      await this.write(updated)
+    })
   }
 
   /** Remove one exact locally managed copy from durable state.
    * @param localInstallationId - Host-generated local installation identity.
    */
   async remove(localInstallationId: string): Promise<void> {
-    const records = await this.list()
-    await this.write(records.filter(record => record.localInstallationId !== localInstallationId))
+    await this.withLock(async () => {
+      const records = await this.list()
+      await this.write(records.filter(record => record.localInstallationId !== localInstallationId))
+    })
+  }
+
+  private async withLock<T>(operation: () => Promise<T>): Promise<T> {
+    const destination = this.path()
+    await mkdir(dirname(destination), { recursive: true, mode: 0o700 })
+    return withFileLock(destination, operation, { waitMs: 10_000 })
   }
 
   private path(): string {
@@ -62,7 +82,12 @@ export class TeamSkillInstallationStore {
 }
 
 function sameInstallation(left: TeamSkillInstallationRecord, right: TeamSkillInstallationRecord): boolean {
-  return left.skillId === right.skillId && left.scope === right.scope && left.workspaceId === right.workspaceId
+  return (
+    left.skillId === right.skillId &&
+    left.scope === right.scope &&
+    left.workspaceId === right.workspaceId &&
+    left.projectId === right.projectId
+  )
 }
 
 function parseRecords(source: string): readonly TeamSkillInstallationRecord[] {

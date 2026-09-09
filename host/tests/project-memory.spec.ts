@@ -91,4 +91,12 @@ describe('project memory Host API', () => {
       code: 'MEMORY_SERVICE_UNAVAILABLE',
     })
   })
+
+  it('classifies malformed memory JSON as a protocol failure', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      new Response('{not-json', { status: 200, headers: { 'content-type': 'application/json' } }),
+    )
+    const client = new TeamSkillHttpClient({ apiBaseUrl: 'https://service.test/v3', accessToken: 'token', fetch })
+    await expect(client.memoryList({ projectId: 'p1' })).rejects.toMatchObject({ code: 'SERVICE_PROTOCOL_ERROR' })
+  })
 })

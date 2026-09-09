@@ -1,11 +1,15 @@
 /** Host-only Team Skill workflow: authorized download, verified write and local record. */
 
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { cp, mkdir, rename, rm } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import { credentialKey, type CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import { TeamSkillInstallError, installTeamSkill, quarantineTeamSkill, uninstallTeamSkill } from './installer.ts'
 import { TeamSkillAccountHttpClient, type TeamSkillAccountSessionResponse, TeamSkillHttpClient, TeamSkillHttpError } from './http.ts'
-import { TeamSkillInstallationStore } from './installation-store.ts'
+import { TeamSkillInstallationStore, type TeamSkillInstallationStoreLike } from './installation-store.ts'
+import type { TelemetryBatchRequest } from './types.ts'
+import type { TelemetrySendOutcome } from './telemetry/reporter.ts'
+import { sanitizeSensitiveSummary } from './telemetry/sanitize.ts'
 import type {
   TeamSkillCatalogResult,
   TeamSkillAccessSummary,
@@ -38,7 +42,15 @@ import type {
 
 const ACCOUNT_CREDENTIAL_KEY = credentialKey('dsh-ai-coding-platform', 'account')
 
+/**
+ * Local queue partition name for static-token deployments: only used while no
+ * login-state account exists. The gateway's resolveAccount must publish the
+ * same value so partition and `Authorization` identity stay comparable.
+ */
+export const STATIC_TOKEN_PARTITION = 'static-token'
+
 interface AccountGrant {
+  readonly userId: string
   readonly accessToken: string
   readonly refreshToken: string
   readonly expiresAt: number
@@ -67,10 +79,14 @@ export interface TeamSkillHostOptions {
   ) => Promise<boolean>
   /** Injectable fetch implementation for focused Host tests. */
   readonly fetch?: typeof globalThis.fetch
+  /** Injectable durable installation store for deterministic failure-path tests. */
+  readonly installationStore?: TeamSkillInstallationStoreLike
 }
 
 /** Orchestrates a real local Team Skill operation from server authorization to DSH discovery. */
 export class TeamSkillHost {
+  private readonly refreshInFlight = new Map<string, Promise<AccountGrant>>()
+
   constructor(private readonly options: TeamSkillHostOptions) {}
 
   /** Authenticate and persist a service session in the Host credential store.
@@ -114,17 +130,13 @@ export class TeamSkillHost {
    * @returns Browser-safe account state or an explicit unavailable, signed-out, or failed state.
    */
   async refreshAccount(): Promise<TeamSkillAccountResult<TeamSkillAccountState>> {
-    const client = this.accountClient()
-    if ('status' in client) return client
-    if (this.options.credentials === undefined) return missing(['credentials'])
-    const session = await this.readAccountSession()
-    if (session === undefined) return { status: 'signed-out' }
+    const context = await this.accountMutationContext()
+    if ('status' in context) return context
     try {
-      const next = await client.refresh(session.refreshToken)
-      await this.writeAccountSession(next)
-      return accountState(next)
+      const next = await this.refreshSession(context.client, context.session, true)
+      const me = await context.client.me(next.accessToken)
+      return { status: 'authenticated', user: me.user, memberships: me.memberships, mustChangePassword: me.user.mustChangePassword }
     } catch (error) {
-      await this.clearAccountSession()
       return failureOf(error)
     }
   }
@@ -134,13 +146,14 @@ export class TeamSkillHost {
    * @returns Browser-safe account state or an explicit unavailable, signed-out, or failed state.
    */
   async changePassword(request: TeamSkillChangePasswordRequest): Promise<TeamSkillAccountResult<TeamSkillAccountState>> {
-    const client = this.accountClient()
-    if ('status' in client) return client
-    if (this.options.credentials === undefined) return missing(['credentials'])
-    const session = await this.readAccountSession()
-    if (session === undefined) return { status: 'signed-out' }
+    const context = await this.accountMutationContext()
+    if ('status' in context) return context
     try {
-      const next = await this.accountRequest(client, session, accessToken => client.changePassword(accessToken, request))
+      const next = await this.accountRequest(
+        context.client,
+        context.session,
+        accessToken => context.client.changePassword(accessToken, request),
+      )
       await this.writeAccountSession(next)
       return accountState(next)
     } catch (error) {
@@ -213,16 +226,12 @@ export class TeamSkillHost {
 
   /** Read the visible catalog without returning a fake fallback when service configuration is incomplete.
    * @param projectId - Opaque project identity authorized by the service.
-   * @returns Current catalog or an explicit unavailable or failed state.
+   * @returns Current catalog or an explicit signed-out, unavailable, or failed state.
    */
   async catalog(projectId: string): Promise<TeamSkillCatalogResult> {
-    const client = await this.client()
-    if ('status' in client) return client
-    try {
-      return { status: 'ready', catalog: await client.catalog(projectId) }
-    } catch (error) {
-      return failureOf(error)
-    }
+    const result = await this.authorizedRequest(client => client.catalog(projectId))
+    if (isTerminalResult(result)) return result
+    return { status: 'ready', catalog: result }
   }
 
   /** Read current project knowledge-base summaries through the service.
@@ -230,7 +239,7 @@ export class TeamSkillHost {
    * @returns Server-authoritative knowledge-base summaries or an explicit failure.
    */
   async knowledgeBases(projectId: string): Promise<TeamSkillAccountResult<readonly TeamSkillKnowledgeBaseSummary[]>> {
-    return this.knowledgeRequest(client => client.knowledgeBases(projectId))
+    return this.authorizedRequest(client => client.knowledgeBases(projectId))
   }
 
   /** Search explicitly selected knowledge bases for one conversation turn.
@@ -242,7 +251,7 @@ export class TeamSkillHost {
     request: TeamSkillKnowledgeSearchRequest,
     signal?: AbortSignal,
   ): Promise<TeamSkillAccountResult<{ readonly status: 'ready'; readonly response: TeamSkillKnowledgeSearchResponse }>> {
-    const result = await this.knowledgeRequest(client => client.knowledgeSearch(request, signal), signal)
+    const result = await this.authorizedRequest(client => client.knowledgeSearch(request, signal), signal)
     if (isKnowledgeFailure(result)) return result
     return { status: 'ready', response: result }
   }
@@ -253,7 +262,7 @@ export class TeamSkillHost {
    * @returns Server-authoritative preview or an explicit failure.
    */
   async knowledgePreview(knowledgeBaseId: string, documentId: string): Promise<TeamSkillAccountResult<TeamSkillKnowledgePreview>> {
-    return this.knowledgeRequest(client => client.knowledgePreview(knowledgeBaseId, documentId))
+    return this.authorizedRequest(client => client.knowledgePreview(knowledgeBaseId, documentId))
   }
 
   /** Recall project memories without blocking the native coding request.
@@ -265,7 +274,7 @@ export class TeamSkillHost {
     request: { readonly projectId: string; readonly query: string },
     signal?: AbortSignal,
   ): Promise<TeamSkillAccountResult<TeamSkillMemoryRecallResponse>> {
-    return this.memoryRequest(client => client.memoryRecall(request, signal), signal)
+    return this.authorizedRequest(client => client.memoryRecall(request, signal), signal)
   }
 
   /** Accept one asynchronous automatic-capture batch.
@@ -282,7 +291,7 @@ export class TeamSkillHost {
     },
     idempotencyKey: string,
   ): Promise<TeamSkillAccountResult<TeamSkillMemoryMutation>> {
-    return this.memoryRequest(client => client.memoryCapture(request, idempotencyKey))
+    return this.authorizedRequest(client => client.memoryCapture(request, idempotencyKey))
   }
 
   /** List project memories from the server cursor.
@@ -295,7 +304,7 @@ export class TeamSkillHost {
     readonly cursor?: string
     readonly limit?: number
   }): Promise<TeamSkillAccountResult<TeamSkillMemoryPage>> {
-    return this.memoryRequest(client => client.memoryList(request))
+    return this.authorizedRequest(client => client.memoryList(request))
   }
 
   /** Read one project-memory detail.
@@ -303,7 +312,7 @@ export class TeamSkillHost {
    * @returns Server-authoritative memory detail or an explicit service failure.
    */
   async memoryGet(memoryId: string): Promise<TeamSkillAccountResult<TeamSkillMemory>> {
-    return this.memoryRequest(client => client.memoryGet(memoryId))
+    return this.authorizedRequest(client => client.memoryGet(memoryId))
   }
 
   /** Update one project-memory body with server revision control.
@@ -315,7 +324,7 @@ export class TeamSkillHost {
     readonly content: string
     readonly expectedRevision: number
   }): Promise<TeamSkillAccountResult<TeamSkillMemoryMutation>> {
-    return this.memoryRequest(client => client.memoryUpdate(request))
+    return this.authorizedRequest(client => client.memoryUpdate(request))
   }
 
   /** Delete one project-memory record and return its cleanup job.
@@ -327,7 +336,7 @@ export class TeamSkillHost {
     request: { readonly memoryId: string; readonly expectedRevision: number },
     idempotencyKey: string,
   ): Promise<TeamSkillAccountResult<TeamSkillMemoryMutation>> {
-    return this.memoryRequest(client => client.memoryDelete(request, idempotencyKey))
+    return this.authorizedRequest(client => client.memoryDelete(request, idempotencyKey))
   }
 
   /** List capture, indexing, and cleanup jobs.
@@ -335,7 +344,7 @@ export class TeamSkillHost {
    * @returns Server-authoritative jobs or an explicit service failure.
    */
   async memoryJobs(projectId?: string): Promise<TeamSkillAccountResult<readonly TeamSkillMemoryJob[]>> {
-    return this.memoryRequest(client => client.memoryJobs(projectId))
+    return this.authorizedRequest(client => client.memoryJobs(projectId))
   }
 
   /** List server memory governance audit records.
@@ -343,54 +352,173 @@ export class TeamSkillHost {
    * @returns Server-authoritative audit records or an explicit service failure.
    */
   async memoryAudit(projectId?: string): Promise<TeamSkillAccountResult<readonly TeamSkillMemoryAudit[]>> {
-    return this.memoryRequest(client => client.memoryAudit(projectId))
+    return this.authorizedRequest(client => client.memoryAudit(projectId))
+  }
+
+  /** Resolve the capture-time account partition for the collector without exposing tokens.
+   * @returns The account user id, or an explicit signed-out or not-ready state.
+   */
+  async telemetryAccount(): Promise<{ readonly userId: string } | { readonly status: 'signed-out' | 'not-ready' }> {
+    // 未配置凭据服务 = 部署根本没有登录能力，确认无登录态（静态 Token 部署）。
+    if (this.options.credentials === undefined) return { status: 'signed-out' }
+    try {
+      const session = await this.readAccountSession()
+      // 记录不存在 = 明确登出，同样确认无登录态。
+      if (session === undefined) return { status: 'signed-out' }
+      return { userId: session.userId }
+    } catch {
+      // 凭据读取异常（存储损坏等）：无法确认登录状态，必须停止而非回落。
+      return { status: 'not-ready' }
+    }
+  }
+
+  /** Deliver one telemetry batch for the given account partition with the account request's single refresh.
+   * @param batch - Marked single-project batch.
+   * @param timeoutMs - Hard client-side delivery timeout.
+   * @param expectedAccountId - Queue partition the reporter claimed the batch from; the freshly
+   * resolved account must match it or nothing is sent, so partition and `Authorization` identity
+   * cannot diverge across an await (login/logout between resolve and send).
+   * @returns The explicit send outcome for the reporter's queue policy.
+   * @remarks Send credentials are immutable within one delivery: the credential resolved at
+   * partition-check time serves the whole request, and a 401 triggers at most one in-request
+   * refresh inside `accountRequest` — a later account change is only observed by the next
+   * delivery's partition check (regression: gateway spec R11, loop spec recovery).
+   */
+  async telemetryDeliver(batch: TelemetryBatchRequest, timeoutMs: number, expectedAccountId: string): Promise<TelemetrySendOutcome> {
+    const apiBaseUrl = this.options.apiBaseUrl
+    if (apiBaseUrl === undefined || apiBaseUrl.length === 0) {
+      return { status: 'failed', code: 'API_BASE_URL_MISSING', summary: 'AI Coding service endpoint is not configured.' }
+    }
+    const deliver = (accessToken: string) => {
+      const client = new TeamSkillHttpClient({
+        apiBaseUrl,
+        accessToken,
+        ...(this.options.fetch === undefined ? {} : { fetch: this.options.fetch }),
+      })
+      return client.telemetryBatches(batch, timeoutMs)
+    }
+    // 登录态账号优先：静态 Token 只在没有登录态账号时兜底，
+    // 账号路径的 401 仍触发既有的一次刷新语义。
+    const accountClient = this.accountClient()
+    if ('status' in accountClient) {
+      return { status: 'failed', code: 'API_BASE_URL_MISSING', summary: 'AI Coding service endpoint is not configured.' }
+    }
+    let session: AccountGrant | undefined
+    try {
+      session = await this.readAccountSession()
+    } catch {
+      // 凭据读取异常：无法确认登录状态，停止发送而非回落静态 Token。
+      return { status: 'failed', code: 'CREDENTIALS_UNAVAILABLE', summary: '凭据存储读取失败，遥测发送已停止。' }
+    }
+    // 分区与发送身份原子一致：解析结果与 claim 分区不同（解析与发送之间发生了
+    // 登录/登出/切换）时绝不发送，由 Reporter 下一次 drain 重新解析再投递。
+    const resolvedPartition = session !== undefined
+      ? session.userId
+      : this.options.accessToken !== undefined && this.options.accessToken.length > 0 ? STATIC_TOKEN_PARTITION : undefined
+    if (resolvedPartition === undefined || resolvedPartition !== expectedAccountId) {
+      return {
+        status: 'failed',
+        code: 'TELEMETRY_ACCOUNT_CHANGED',
+        summary: `queue partition ${expectedAccountId} no longer matches the resolved account; batch deferred.`,
+      }
+    }
+    if (session !== undefined) {
+      try {
+        const result = await this.accountRequest(accountClient, session, async accessToken => deliver(accessToken))
+        return { status: 'sent', result }
+      } catch (error) {
+        return this.mapDeliveryError(error)
+      }
+    }
+    const staticToken = this.options.accessToken
+    if (staticToken !== undefined && staticToken.length > 0) {
+      try {
+        return { status: 'sent', result: await deliver(staticToken) }
+      } catch (error) {
+        return this.mapDeliveryError(error)
+      }
+    }
+    // Unreachable while the partition check passes (it requires a session or a
+    // static token); kept as the explicit signed-out terminal state.
+    return { status: 'signed-out' }
+  }
+
+  /** Map one delivery failure to the explicit reporter outcome. */
+  private mapDeliveryError(error: unknown): TelemetrySendOutcome {
+    return this.mapDeliveryErrorInner(error)
+  }
+
+  /** Strip credential-bearing substrings from a summary before exposing it to the reporter. */
+  private sanitizeErrorSummary(value: string): string {
+    return sanitizeSensitiveSummary(value)
+  }
+
+  private mapDeliveryErrorInner(error: unknown): TelemetrySendOutcome {
+    if (error instanceof TeamSkillHttpError) {
+      if (isExpiredTokenCode(error.code)) {
+        // The refresh already ran and failed inside accountRequest; credentials are cleared.
+        return { status: 'signed-out' }
+      }
+      if (error.code === 'PROJECT_ACCESS_REVOKED') return { status: 'revoked' }
+      return { status: 'failed', code: error.code, summary: this.sanitizeErrorSummary(error.message).slice(0, 200) }
+    }
+    return {
+      status: 'failed',
+      code: 'NETWORK_ERROR',
+      summary: sanitizeSensitiveSummary(error instanceof Error ? error.message : 'telemetry delivery failed').slice(0, 200),
+    }
   }
 
   /** Return browser-safe, service-authorized installation summaries for one project.
    * @param projectId - Opaque project identity to reauthorize before returning local records.
-   * @returns Browser-safe installation summaries or an explicit local-state error.
+   * @returns Browser-safe installation summaries or an explicit signed-out, local-state error.
    */
-  async installations(projectId: string): Promise<readonly TeamSkillInstallationView[] | TeamSkillNotReady | TeamSkillFailed> {
-    if (this.options.stateDirectory === undefined) return missing(['stateDirectory'])
-    try {
-      const records = (await this.store().list()).filter(record => record.projectId === projectId)
-      if (records.length === 0) return Object.freeze([])
-      const client = await this.client()
-      if ('status' in client) return client
-      const statuses = await client.releaseStatus(
-        records.map(record => ({ projectId: record.projectId, skillId: record.skillId, version: record.installed.version })),
-      )
-      const visibleKeys = new Set(statuses.map(item => `${item.projectId}:${item.skillId}:${item.version}`))
-      return Object.freeze(
-        records
-          .filter(record => visibleKeys.has(`${record.projectId}:${record.skillId}:${record.installed.version}`))
-          .map(toInstallationView),
-      )
-    } catch (error) {
-      return failureOf(error)
-    }
+  async installations(
+    projectId: string,
+  ): Promise<readonly TeamSkillInstallationView[] | TeamSkillNotReady | TeamSkillFailed | { readonly status: 'signed-out' }> {
+    const context = await this.installationContext(projectId)
+    if ('status' in context) return context
+    if (context.records.length === 0) return Object.freeze([])
+    // The service only reports installable (published) releases; a record absent from the
+    // authoritative response is withdrawn or unpublished and is hidden from the browser.
+    const visibleKeys = new Set(context.statuses.map(item => `${item.projectId}:${item.skillId}:${item.version}`))
+    return Object.freeze(
+      context.records
+        .filter(record => visibleKeys.has(`${record.projectId}:${record.skillId}:${record.installed.version}`))
+        .map(toInstallationView),
+    )
   }
 
   /** Synchronize one project's local copies with server release state and quarantine unavailable versions.
    * @param projectId - Opaque project identity to reauthorize before synchronizing local records.
-   * @returns Updated local copies or an explicit unavailable or failed state.
+   * @returns Updated local copies or an explicit signed-out, unavailable, or failed state.
    */
-  async syncReleaseStatus(projectId: string): Promise<readonly TeamSkillInstallationView[] | TeamSkillNotReady | TeamSkillFailed> {
-    if (this.options.stateDirectory === undefined) return missing(['stateDirectory'])
+  async syncReleaseStatus(
+    projectId: string,
+  ): Promise<readonly TeamSkillInstallationView[] | TeamSkillNotReady | TeamSkillFailed | { readonly status: 'signed-out' }> {
+    const stateDirectory = this.options.stateDirectory
+    if (stateDirectory === undefined) return missing(['stateDirectory'])
+    const context = await this.installationContext(projectId)
+    if ('status' in context) return context
+    if (context.records.length === 0) return Object.freeze([])
     try {
-      const records = (await this.store().list()).filter(record => record.projectId === projectId)
-      if (records.length === 0) return Object.freeze([])
-      const client = await this.client()
-      if ('status' in client) return client
-      const statuses = await client.releaseStatus(
-        records.map(record => ({ projectId: record.projectId, skillId: record.skillId, version: record.installed.version })),
-      )
-      const statusByKey = new Map(statuses.map(item => [`${item.projectId}:${item.skillId}:${item.version}`, item.status]))
+      const statusByKey = new Map(context.statuses.map(item => [`${item.projectId}:${item.skillId}:${item.version}`, item.status]))
       const updated: TeamSkillInstallationRecord[] = []
-      for (const record of records) {
+      for (const record of context.records) {
+        // The service only returns published installable releases: an absent record means
+        // the installed version is unpublished or withdrawn and must be quarantined.
         const releaseStatus = statusByKey.get(`${record.projectId}:${record.skillId}:${record.installed.version}`)
         if (record.installed.state !== 'normal') {
-          if (releaseStatus !== undefined) updated.push(record)
+          if (record.installed.state === 'withdrawn' && releaseStatus === undefined) {
+            const root = this.localRoot(record.scope, record.workspaceId)
+            if ('status' in root) throw new TeamSkillHttpError('LOCAL_WORKSPACE_UNAVAILABLE', '无法定位已隔离 Skill 的本地作用域。')
+            const discovered =
+              this.options.refreshSkillCatalog === undefined
+                ? true
+                : await this.options.refreshSkillCatalog(record.scope, root.workspacePath, record.installed.runtimeName, false)
+            if (!discovered) throw new TeamSkillHttpError('LOCAL_REFRESH_FAILED', 'DSH 未能确认已隔离的 Team Skill。')
+          }
+          updated.push(record)
           continue
         }
         if (releaseStatus === 'published') {
@@ -401,16 +529,25 @@ export class TeamSkillHost {
         if ('status' in root) throw new TeamSkillHttpError('LOCAL_WORKSPACE_UNAVAILABLE', '无法定位已下线 Skill 的本地作用域。')
         const withdrawn = await quarantineTeamSkill({
           installed: record.installed,
-          quarantineRoot: join(this.options.stateDirectory, 'quarantine', record.localInstallationId),
+          quarantineRoot: join(stateDirectory, 'quarantine', record.localInstallationId),
         })
+        // 隔离移动后立即落盘 withdrawn 记录：即使后续 discovery 刷新失败，重试也不会
+        // 再指向已移动的旧路径，而是幂等地保持隔离状态。
+        const next = Object.freeze({ ...record, installed: withdrawn })
+        try {
+          await this.store().upsert(next)
+        } catch (error) {
+          await restoreMovedCopy(withdrawn.directory, record.installed.directory)
+          throw error
+        }
         const discovered =
           this.options.refreshSkillCatalog === undefined
             ? true
             : await this.options.refreshSkillCatalog(record.scope, root.workspacePath, record.installed.runtimeName, false)
         if (!discovered) throw new TeamSkillHttpError('LOCAL_REFRESH_FAILED', 'DSH 未能移除已下线的 Team Skill。')
-        const next = Object.freeze({ ...record, installed: withdrawn })
-        await this.store().upsert(next)
-        if (releaseStatus !== undefined) updated.push(next)
+        // The quarantined record is user-visible as `withdrawn` even though the service
+        // no longer reports the release: hiding it entirely would orphan the local copy.
+        updated.push(next)
       }
       return Object.freeze(updated.map(toInstallationView))
     } catch (error) {
@@ -431,14 +568,21 @@ export class TeamSkillHost {
       if (record.installed.state !== 'normal') return { status: 'succeeded', installation: toInstallationView(record) }
       const root = this.localRoot(record.scope, record.workspaceId)
       if ('status' in root) return root
-      const removed = await uninstallTeamSkill({
-        installed: record.installed,
-        ...(request.confirmModifiedReplace === true ? { confirmModifiedReplace: true } : {}),
-      })
+      const removed = Object.freeze({ ...record.installed, state: 'uninstalled' as const })
+      const next = Object.freeze({ ...record, installed: removed })
+      // 先写入终态记录，删除失败时恢复 normal，避免记录与磁盘状态分离。
+      await this.store().upsert(next)
+      try {
+        await uninstallTeamSkill({
+          installed: record.installed,
+          ...(request.confirmModifiedReplace === true ? { confirmModifiedReplace: true } : {}),
+        })
+      } catch (error) {
+        await this.store().upsert(record)
+        throw error
+      }
       const discovered = await this.options.refreshSkillCatalog(record.scope, root.workspacePath, record.installed.runtimeName, false)
       if (!discovered) throw new TeamSkillHttpError('LOCAL_REFRESH_FAILED', 'DSH 未能移除本地 Team Skill。')
-      const next = Object.freeze({ ...record, installed: removed })
-      await this.store().upsert(next)
       return { status: 'succeeded', installation: toInstallationView(next) }
     } catch (error) {
       return failureOf(error)
@@ -450,70 +594,118 @@ export class TeamSkillHost {
    * @returns Final explicit installation result.
    */
   async install(request: TeamSkillInstallRequest): Promise<TeamSkillInstallResult> {
-    const client = await this.client()
-    if ('status' in client) return client
     const localRoot = this.localRoot(request.scope, request.workspaceId)
     if ('status' in localRoot) return localRoot
     if (this.options.stateDirectory === undefined) return missing(['stateDirectory'])
+    const stateDirectory = this.options.stateDirectory
     if (this.options.refreshSkillCatalog === undefined) return missing(['refreshSkillCatalog'])
-
+    const refreshSkillCatalog = this.options.refreshSkillCatalog
     const localInstallationId = randomUUID()
-    let operationId: string | undefined
     let eventSequence = 0
-    try {
-      const authorized = await client.createInstallation({
-        skillId: request.skillId,
-        version: request.version,
-        projectId: request.projectId,
-        scope: request.scope,
-        localInstallationId,
-        environment: request.environment,
-      })
-      operationId = authorized.operationId
-      await this.report(client, operationId, ++eventSequence, 'downloading')
-      const archive = await client.download(authorized.artifact.downloadUrl)
-      await this.report(client, operationId, ++eventSequence, 'verifying')
+    return this.authorizedRequest(async (client) => {
+      let operationId: string | undefined
+      let rollbackDirectory: string | undefined
+      try {
+        const authorized = await client.createInstallation({
+          skillId: request.skillId,
+          version: request.version,
+          projectId: request.projectId,
+          scope: request.scope,
+          localInstallationId,
+          environment: request.environment,
+        })
+        operationId = authorized.operationId
+        await this.report(client, operationId, ++eventSequence, 'downloading')
+        const archive = await client.download(authorized.artifact.downloadUrl)
+        await this.report(client, operationId, ++eventSequence, 'verifying')
 
-      const current = (await this.store().list()).find(record => sameScope(record, request.scope, request.workspaceId, request.skillId))
-      await this.report(client, operationId, ++eventSequence, 'writing')
-      const installed = await installTeamSkill({
-        scopeRoot: localRoot.root,
-        runtimeName: authorized.runtimeName,
-        version: authorized.version,
-        archive,
-        expectedSha256: authorized.artifact.sha256,
-        expectedFileDigests: authorized.artifact.files,
-        ...(current === undefined ? {} : { current: current.installed }),
-        ...(request.confirmModifiedReplace === true ? { confirmModifiedReplace: true } : {}),
-      })
-      const installation: TeamSkillInstallationRecord = Object.freeze({
-        localInstallationId,
-        skillId: authorized.skillId,
-        projectId: request.projectId,
-        scope: request.scope,
-        ...(request.workspaceId === undefined ? {} : { workspaceId: request.workspaceId }),
-        installed,
-        installedAt: new Date().toISOString(),
-      })
-      await this.store().upsert(installation)
-      await this.report(client, operationId, ++eventSequence, 'refreshing')
-      const discovered = await this.options.refreshSkillCatalog(request.scope, localRoot.workspacePath, authorized.runtimeName)
-      if (!discovered) {
-        throw new TeamSkillHttpError('LOCAL_REFRESH_FAILED', 'DSH did not discover the installed Team Skill.')
-      }
-      await this.report(client, operationId, ++eventSequence, 'succeeded')
-      return { status: 'succeeded', installation: toInstallationView(installation) }
-    } catch (error) {
-      const failure = failureOf(error)
-      if (operationId !== undefined) {
+        const current = (await this.store().list()).find(record =>
+          samePhysicalCopy(record, request.scope, request.workspaceId, request.skillId),
+        )
+        rollbackDirectory =
+          current?.installed.state === 'normal'
+            ? await snapshotManagedCopy(current.installed.directory, stateDirectory)
+            : undefined
+        await this.report(client, operationId, ++eventSequence, 'writing')
+        const installed = await installTeamSkill({
+          scopeRoot: localRoot.root,
+          runtimeName: authorized.runtimeName,
+          version: authorized.version,
+          archive,
+          expectedSha256: authorized.artifact.sha256,
+          expectedFileDigests: authorized.artifact.files,
+          ...(current === undefined ? {} : { current: current.installed }),
+          ...(request.confirmModifiedReplace === true ? { confirmModifiedReplace: true } : {}),
+        })
+        // A physical copy lives at one scope root. Keep the exact records changed by
+        // ownership transfer so every later failure can restore the pre-install state.
+        const superseded: TeamSkillInstallationRecord[] = []
+        let installation: TeamSkillInstallationRecord
         try {
-          await this.report(client, operationId, ++eventSequence, 'failed', failure.code)
-        } catch {
-          // The original operation failure remains the user-visible cause.
+          for (const record of await this.store().list()) {
+            if (record.installed.state !== 'normal' || !samePhysicalCopy(record, request.scope, request.workspaceId, request.skillId))
+              continue
+            superseded.push(record)
+            await this.store().upsert(
+              Object.freeze({ ...record, installed: Object.freeze({ ...record.installed, state: 'uninstalled' }) }),
+            )
+          }
+          installation = Object.freeze({
+            localInstallationId,
+            skillId: authorized.skillId,
+            projectId: request.projectId,
+            scope: request.scope,
+            ...(request.workspaceId === undefined ? {} : { workspaceId: request.workspaceId }),
+            installed,
+            installedAt: new Date().toISOString(),
+          })
+          await this.store().upsert(installation)
+        } catch (error) {
+          await uninstallTeamSkill({ installed })
+          await restoreSnapshot(rollbackDirectory, installed.directory)
+          for (const record of superseded)
+            await this.store().upsert(record)
+          throw error
         }
+        await this.report(client, operationId, ++eventSequence, 'refreshing')
+        let discovered: boolean
+        try {
+          discovered = await refreshSkillCatalog(request.scope, localRoot.workspacePath, authorized.runtimeName)
+        } catch (error) {
+          await uninstallTeamSkill({ installed })
+          await restoreSnapshot(rollbackDirectory, installed.directory)
+          await this.store().remove(localInstallationId)
+          for (const record of superseded)
+            await this.store().upsert(Object.freeze({ ...record, installed: Object.freeze({ ...record.installed, state: 'normal' }) }))
+          throw error
+        }
+        if (!discovered) {
+          // 可重入补偿：discovery 未确认时回滚本次安装——移除磁盘副本、删除新记录、
+          // 恢复被取代的旧记录，重试安装会得到唯一确定的干净状态。
+          await uninstallTeamSkill({ installed })
+          await restoreSnapshot(rollbackDirectory, installed.directory)
+          await this.store().remove(localInstallationId)
+          for (const record of superseded) {
+            await this.store().upsert(Object.freeze({ ...record, installed: Object.freeze({ ...record.installed, state: 'normal' }) }))
+          }
+          throw new TeamSkillHttpError('LOCAL_REFRESH_FAILED', 'DSH did not discover the installed Team Skill.')
+        }
+        await removeSnapshot(rollbackDirectory)
+        await this.report(client, operationId, ++eventSequence, 'succeeded')
+        return { status: 'succeeded', installation: toInstallationView(installation) }
+      } catch (error) {
+        await removeSnapshot(rollbackDirectory)
+        const failure = failureOf(error)
+        if (operationId !== undefined) {
+          try {
+            await this.report(client, operationId, ++eventSequence, 'failed', failure.code)
+          } catch {
+            // The original operation failure remains the user-visible cause.
+          }
+        }
+        return failure
       }
-      return failure
-    }
+    })
   }
 
   private async client(): Promise<TeamSkillHttpClient | TeamSkillNotReady | TeamSkillFailed> {
@@ -526,8 +718,7 @@ export class TeamSkillHost {
           if (session.expiresAt <= Date.now() + 30_000) {
             const accountClient = this.accountClient()
             if ('status' in accountClient) return accountClient
-            const refreshed = await accountClient.refresh(session.refreshToken)
-            await this.writeAccountSession(refreshed)
+            const refreshed = await this.refreshSession(accountClient, session)
             accessToken = refreshed.accessToken
           } else {
             accessToken = session.accessToken
@@ -559,6 +750,44 @@ export class TeamSkillHost {
     })
   }
 
+  private async accountMutationContext(): Promise<
+    { readonly client: TeamSkillAccountHttpClient; readonly session: AccountGrant }
+    | TeamSkillNotReady
+    | { readonly status: 'signed-out' }
+  > {
+    const client = this.accountClient()
+    if ('status' in client) return client
+    if (this.options.credentials === undefined) return missing(['credentials'])
+    const session = await this.readAccountSession()
+    if (session === undefined) return { status: 'signed-out' }
+    return { client, session }
+  }
+
+  private async installationContext(projectId: string): Promise<
+    {
+      readonly records: readonly TeamSkillInstallationRecord[]
+      readonly statuses: Awaited<ReturnType<TeamSkillHttpClient['releaseStatus']>>
+    }
+    | TeamSkillNotReady
+    | TeamSkillFailed
+    | { readonly status: 'signed-out' }
+  > {
+    if (this.options.stateDirectory === undefined) return missing(['stateDirectory'])
+    try {
+      const records = (await this.store().list()).filter(record => record.projectId === projectId)
+      if (records.length === 0) return { records: Object.freeze([]), statuses: Object.freeze([]) }
+      const statuses = await this.authorizedRequest(async client =>
+        client.releaseStatus(
+          records.map(record => ({ projectId: record.projectId, skillId: record.skillId, version: record.installed.version })),
+        ),
+      )
+      if (isTerminalResult(statuses)) return statuses
+      return { records, statuses }
+    } catch (error) {
+      return failureOf(error)
+    }
+  }
+
   private async readAccountSession(): Promise<AccountGrant | undefined> {
     const credentials = this.options.credentials
     if (credentials === undefined) return undefined
@@ -573,6 +802,7 @@ export class TeamSkillHost {
     const credentials = this.options.credentials
     if (credentials === undefined) throw new TeamSkillHttpError('CREDENTIALS_UNAVAILABLE', 'DSH 凭据服务不可用。')
     const payload: AccountGrant = {
+      userId: session.user.userId,
       accessToken: session.accessToken,
       refreshToken: session.refreshToken,
       expiresAt: Date.now() + session.expiresIn * 1000,
@@ -584,6 +814,49 @@ export class TeamSkillHost {
     await this.options.credentials?.deleteRecord(ACCOUNT_CREDENTIAL_KEY)
   }
 
+  private async clearAccountSessionIfCurrent(expected: AccountGrant): Promise<void> {
+    const current = await this.readAccountSession()
+    if (current?.accessToken === expected.accessToken && current.refreshToken === expected.refreshToken)
+      await this.clearAccountSession()
+  }
+
+  private async refreshSession(
+    client: TeamSkillAccountHttpClient,
+    session: AccountGrant,
+    force = false,
+  ): Promise<AccountGrant> {
+    if (!force) {
+      const current = await this.readAccountSession()
+      if (current !== undefined && current.refreshToken !== session.refreshToken) return current
+    }
+    const existing = this.refreshInFlight.get(session.refreshToken)
+    if (existing !== undefined) return existing
+    const pending = (async (): Promise<AccountGrant> => {
+      try {
+        const current = await this.readAccountSession()
+        if (!force && current !== undefined && current.refreshToken !== session.refreshToken) return current
+        const refreshed = await client.refresh(session.refreshToken)
+        const next: AccountGrant = {
+          userId: refreshed.user.userId,
+          accessToken: refreshed.accessToken,
+          refreshToken: refreshed.refreshToken,
+          expiresAt: Date.now() + refreshed.expiresIn * 1000,
+        }
+        const latest = await this.readAccountSession()
+        if (latest !== undefined && latest.refreshToken !== session.refreshToken) return latest
+        await this.writeAccountSession(refreshed)
+        return next
+      } catch (error) {
+        await this.clearAccountSessionIfCurrent(session)
+        throw error
+      } finally {
+        this.refreshInFlight.delete(session.refreshToken)
+      }
+    })()
+    this.refreshInFlight.set(session.refreshToken, pending)
+    return pending
+  }
+
   private async accountRequest<T>(
     client: TeamSkillAccountHttpClient,
     session: AccountGrant,
@@ -593,8 +866,7 @@ export class TeamSkillHost {
     signal?.throwIfAborted()
     try {
       if (session.expiresAt <= Date.now() + 30_000) {
-        const refreshed = await client.refresh(session.refreshToken)
-        await this.writeAccountSession(refreshed)
+        const refreshed = await this.refreshSession(client, session)
         signal?.throwIfAborted()
         return await operation(refreshed.accessToken)
       }
@@ -602,14 +874,13 @@ export class TeamSkillHost {
     } catch (error) {
       if (!(error instanceof TeamSkillHttpError) || !isExpiredTokenCode(error.code)) throw error
       signal?.throwIfAborted()
-      const refreshed = await client.refresh(session.refreshToken)
-      await this.writeAccountSession(refreshed)
+      const refreshed = await this.refreshSession(client, session)
       signal?.throwIfAborted()
       return await operation(refreshed.accessToken)
     }
   }
 
-  private async knowledgeRequest<T>(
+  private async authorizedRequest<T>(
     operation: (client: TeamSkillHttpClient) => Promise<T>,
     signal?: AbortSignal,
   ): Promise<T | TeamSkillNotReady | TeamSkillFailed | { readonly status: 'signed-out' }> {
@@ -652,16 +923,9 @@ export class TeamSkillHost {
     }
   }
 
-  private memoryRequest<T>(
-    operation: (client: TeamSkillHttpClient) => Promise<T>,
-    signal?: AbortSignal,
-  ): Promise<T | TeamSkillNotReady | TeamSkillFailed | { readonly status: 'signed-out' }> {
-    return this.knowledgeRequest(operation, signal)
-  }
-
-  private store(): TeamSkillInstallationStore {
+  private store(): TeamSkillInstallationStoreLike {
     if (this.options.stateDirectory === undefined) throw new Error('Team Skill state directory is not configured.')
-    return new TeamSkillInstallationStore(this.options.stateDirectory)
+    return this.options.installationStore ?? new TeamSkillInstallationStore(this.options.stateDirectory)
   }
 
   private localRoot(
@@ -689,6 +953,29 @@ export class TeamSkillHost {
   }
 }
 
+async function restoreMovedCopy(sourceDirectory: string, destinationDirectory: string): Promise<void> {
+  await mkdir(dirname(destinationDirectory), { recursive: true, mode: 0o700 })
+  await rename(sourceDirectory, destinationDirectory)
+}
+
+async function snapshotManagedCopy(sourceDirectory: string, stateDirectory: string): Promise<string> {
+  const destination = join(stateDirectory, 'rollback', randomUUID())
+  await mkdir(dirname(destination), { recursive: true, mode: 0o700 })
+  await cp(sourceDirectory, destination, { recursive: true, force: false, errorOnExist: true })
+  return destination
+}
+
+async function restoreSnapshot(snapshot: string | undefined, destination: string): Promise<void> {
+  if (snapshot === undefined) return
+  await rm(destination, { recursive: true, force: true })
+  await mkdir(dirname(destination), { recursive: true, mode: 0o700 })
+  await rename(snapshot, destination)
+}
+
+async function removeSnapshot(snapshot: string | undefined): Promise<void> {
+  if (snapshot !== undefined) await rm(snapshot, { recursive: true, force: true })
+}
+
 function missing(fields: readonly string[]): TeamSkillNotReady {
   return Object.freeze({ status: 'not-ready', missing: Object.freeze([...fields]) })
 }
@@ -701,6 +988,8 @@ function isAccountGrant(value: unknown): value is AccountGrant {
   if (typeof value !== 'object' || value === null) return false
   const record = value as Record<string, unknown>
   return (
+    typeof record.userId === 'string' &&
+    record.userId.length > 0 &&
     typeof record.accessToken === 'string' &&
     record.accessToken.length > 0 &&
     typeof record.refreshToken === 'string' &&
@@ -733,7 +1022,18 @@ function isKnowledgeFailure(
   return status === 'not-ready' || status === 'failed' || status === 'signed-out'
 }
 
-function sameScope(record: TeamSkillInstallationRecord, scope: TeamSkillScope, workspaceId: string | undefined, skillId: string): boolean {
+/** Narrow an authorized-request outcome to its explicit failure, unconfigured, or signed-out states. */
+function isTerminalResult(value: unknown): value is TeamSkillNotReady | TeamSkillFailed | { readonly status: 'signed-out' } {
+  return isKnowledgeFailure(value)
+}
+
+/** One managed physical copy per scope root; the record is whichever project's authorization last wrote it. */
+function samePhysicalCopy(
+  record: TeamSkillInstallationRecord,
+  scope: TeamSkillScope,
+  workspaceId: string | undefined,
+  skillId: string,
+): boolean {
   return record.skillId === skillId && record.scope === scope && record.workspaceId === workspaceId
 }
 

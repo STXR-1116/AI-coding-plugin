@@ -8,6 +8,9 @@ export type TeamSkillScope = 'project' | 'global'
 /** Account roles returned by the authoritative user service. */
 export type TeamSkillAccountRole = 'admin' | 'manager' | 'member'
 
+/** Audit-record roles; system operations are recorded as 'system'. */
+export type TeamSkillAuditRole = 'admin' | 'manager' | 'member' | 'system'
+
 /** Account status returned by the authoritative user service. */
 export type TeamSkillAccountStatus = 'active' | 'suspended'
 
@@ -290,7 +293,7 @@ export interface TeamSkillMemoryMutation {
 export interface TeamSkillMemoryJob {
   readonly jobId: string
   readonly eventId: string
-  readonly kind: 'CAPTURE' | 'INDEX_REFRESH' | 'DELETE_CLEANUP' | 'SCOPE_MOVED'
+  readonly kind: 'CAPTURE' | 'INDEX_REFRESH' | 'DELETE_CLEANUP' | 'PROJECT_PROVISION' | 'POLICY_UPDATE' | 'PROJECT_PURGE'
   readonly teamId: string
   readonly projectId: string
   readonly requestedByUserId: string
@@ -308,7 +311,7 @@ export interface TeamSkillMemoryAudit {
   readonly auditId: string
   readonly operation: string
   readonly operatedByUserId: string
-  readonly role: TeamSkillAccountRole
+  readonly role: TeamSkillAuditRole
   readonly memoryId: string | null
   readonly projectId: string
   readonly result: string
@@ -478,13 +481,18 @@ export interface TeamSkillFailed {
 }
 
 /** Result of a Team Skill catalog request. */
-export type TeamSkillCatalogResult = { readonly status: 'ready'; readonly catalog: TeamSkillCatalog } | TeamSkillNotReady | TeamSkillFailed
+export type TeamSkillCatalogResult =
+  | { readonly status: 'ready'; readonly catalog: TeamSkillCatalog }
+  | TeamSkillNotReady
+  | TeamSkillFailed
+  | { readonly status: 'signed-out' }
 
 /** Result of an installation request. */
 export type TeamSkillInstallResult =
   | { readonly status: 'succeeded'; readonly installation: TeamSkillInstallationView }
   | TeamSkillNotReady
   | TeamSkillFailed
+  | { readonly status: 'signed-out' }
 
 /** Request to remove one Host-managed local copy. */
 export interface TeamSkillUninstallRequest {
@@ -499,3 +507,202 @@ export type TeamSkillUninstallResult =
   | { readonly status: 'succeeded'; readonly installation: TeamSkillInstallationView }
   | TeamSkillNotReady
   | TeamSkillFailed
+
+/** Browser-safe structured observability event vocabulary for the AI Coding collector. */
+
+/** Current structured-event schema version accepted by the service. */
+export const TELEMETRY_SCHEMA_VERSION = 1
+
+/** The fixed first-phase event kinds; the service rejects every other kind. */
+export type TelemetryEventKind =
+  | 'session.started'
+  | 'session.finished'
+  | 'turn.started'
+  | 'turn.finished'
+  | 'step.started'
+  | 'step.finished'
+  | 'llm.request'
+  | 'llm.response'
+  | 'tool.call'
+  | 'tool.result'
+  | 'approval.requested'
+  | 'approval.resolved'
+  | 'compaction.completed'
+  | 'agent.error'
+  | 'delivery.gap'
+
+/** Provable end states for runtime work; absent means the source proved none. */
+export type TelemetryOutcome = 'success' | 'error' | 'interrupted' | 'cancelled' | 'blocked' | 'max_tokens'
+
+/** Provider-reported token counts only; `totalTokens` stays null unless the provider stated it. */
+export interface TelemetryTokenUsage {
+  readonly inputTokens: number | null
+  readonly outputTokens: number | null
+  readonly totalTokens: number | null
+}
+
+/** Cleaned, length-limited error facts; never an exception object or stack. */
+export interface TelemetryErrorDetail {
+  readonly name: string
+  readonly code?: string
+  readonly summary?: string
+}
+
+/** The single approval decision vocabulary mapped from `approval/decided`. */
+export interface TelemetryApprovalDetail {
+  readonly decision?: 'allowed_once' | 'rejected' | 'cancelled' | 'unavailable'
+}
+
+/** Compaction label without any summary content. */
+export interface TelemetryCompactionDetail {
+  readonly kind?: string
+}
+
+/** Why observed data has a hole; gaps are events, never silent drops. */
+export interface TelemetryGapDetail {
+  readonly reason: 'overflow' | 'expired' | 'rejected' | 'manual_clear' | 'authorization_revoked'
+  readonly count: number
+  readonly firstEventId?: string
+  readonly lastEventId?: string
+}
+
+/**
+ * One versioned whitelist event. Fields not observed by the source are
+ * omitted or null — never `0`, empty strings, or invented defaults. No
+ * prompt, assistant reply, tool argument, tool result, command, file
+ * content, absolute path, URL, credential, or raw exception value has a
+ * field here by construction.
+ */
+export interface TelemetryEventDto {
+  readonly schemaVersion: 1
+  /** Stable logical identity; the service dedupes on it. */
+  readonly eventId: string
+  /** Host-persisted installation identity generated on first collector enablement. */
+  readonly installationId: string
+  /** Opaque active project the session was bound to. */
+  readonly projectId: string
+  /** DSH session id; null only for a cross-session delivery gap. */
+  readonly sessionId: string | null
+  readonly kind: TelemetryEventKind
+  /** ISO 8601 UTC instant of the source fact. */
+  readonly occurredAt: string
+  /** DSH source event type or ops source label. */
+  readonly sourceType: string
+  readonly sourceSeq?: number
+  readonly turn?: number
+  readonly step?: number
+  readonly durationMs?: number | null
+  readonly outcome?: TelemetryOutcome
+  readonly provider?: string | null
+  readonly model?: string | null
+  readonly toolName?: string | null
+  readonly toolCategory?: string | null
+  readonly callId?: string | null
+  readonly approvalId?: string | null
+  readonly compactionId?: string | null
+  readonly retryable?: boolean | null
+  readonly retryCount?: number | null
+  readonly tokenUsage?: TelemetryTokenUsage
+  readonly error?: TelemetryErrorDetail
+  readonly approval?: TelemetryApprovalDetail
+  readonly compaction?: TelemetryCompactionDetail
+  readonly gap?: TelemetryGapDetail
+}
+
+/** One per-event classification returned by the batch endpoint. */
+export type TelemetryEventAck =
+  | { readonly eventId: string; readonly status: 'accepted' }
+  | { readonly eventId: string; readonly status: 'duplicate' }
+  | { readonly eventId: string; readonly status: 'retryable'; readonly retryAfterSeconds: number; readonly reason: string }
+  | { readonly eventId: string; readonly status: 'rejected'; readonly reason: string }
+
+/** Parsed batch response; unknown payload shapes fail parsing instead of passing as success. */
+export interface TelemetryBatchResult {
+  readonly batchId: string
+  readonly serverReceivedAt: string
+  readonly serverCheckpoint: string
+  readonly results: readonly TelemetryEventAck[]
+}
+
+/** Collector operating mode reported to the plugin page. */
+export type CollectorMode =
+  | 'active'
+  | 'paused'
+  | 'not-ready'
+  | 'signed-out'
+  | 'authorization-revoked'
+  | 'storage-error'
+  | 'failed'
+
+/** Authorization state of the currently bound project. */
+export type CollectorAuthorizationState = 'authorized' | 'revoked' | 'unknown'
+
+/** Restricted last-failure facts: codes, stage, time, and a bounded summary. */
+export interface CollectorFailure {
+  readonly stage: 'enqueue' | 'send' | 'parse' | 'storage'
+  readonly code: string
+  readonly at: string
+  readonly summary: string
+}
+
+/** Browser-safe collector pipeline status returned through the Remote. */
+export interface CollectorStatus {
+  readonly mode: CollectorMode
+  /** Currently selected collector project, when any. */
+  readonly projectId: string | null
+  readonly queueEventCount: number
+  readonly queueByteCount: number
+  readonly lastAcceptedAt: string | null
+  readonly lastFailure: CollectorFailure | null
+  readonly gapCount: number
+  readonly authorizationState: CollectorAuthorizationState
+  /** Records received at the collector entry for bound sessions, regardless
+   * of account state. */
+  readonly receivedEventCount: number
+  /** Records that reached the collector for a bound session while no account
+   * partition was publishable (authentication pending/isolated or signed
+   * out) and were therefore not written to any partition. */
+  readonly isolatedEventCount: number
+  /** Set when the local queue could not be opened or migrated; sending stops. */
+  readonly storageError: string | null
+}
+
+/** Result wrapper for collector control operations — failures are explicit, never void. */
+export type CollectorResult<T> =
+  | { readonly status: 'ready'; readonly value: T }
+  | { readonly status: 'not-ready'; readonly missing: readonly string[] }
+  | { readonly status: 'failed'; readonly code: string; readonly message: string }
+
+/** Deployment-tunable collector queue settings, validated at Host load. */
+export interface TelemetryQueueSettings {
+  /** Maximum queued events across all account partitions. */
+  readonly maxEvents: number
+  /** Maximum queued payload bytes across all account partitions. */
+  readonly maxBytes: number
+  /** Maximum events in one outgoing batch. */
+  readonly batchMaxEvents: number
+  /** Maximum payload bytes in one outgoing batch. */
+  readonly batchMaxBytes: number
+  /** Idle interval before the reporter flushes pending events. */
+  readonly flushIntervalMs: number
+  /** Per-request HTTP timeout for batch delivery. */
+  readonly httpTimeoutMs: number
+  /** Send attempts per event before it becomes an `expired` gap. */
+  readonly maxAttempts: number
+  /** How long a batch claim (in-flight lease) stays valid before another queue handle may recover it. */
+  readonly claimTimeoutMs: number
+  /** How long unconfirmed events stay queued before an `expired` gap. */
+  readonly retentionMs: number
+}
+
+/** One outgoing batch body for `POST /v1/telemetry/batches`. */
+export interface TelemetryBatchRequest {
+  readonly schemaVersion: 1
+  readonly batchId: string
+  readonly projectId: string
+  readonly clientSentAt: string
+  readonly events: readonly TelemetryEventDto[]
+}
+
+/** Collector control results merge the reporter state with queue totals. */
+export type CollectorSnapshot = CollectorResult<CollectorStatus>

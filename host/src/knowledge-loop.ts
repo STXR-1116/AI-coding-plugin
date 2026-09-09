@@ -4,6 +4,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { TeamSkillKnowledgeSearchRequest, TeamSkillKnowledgeSearchResponse, TeamSkillKnowledgeSelection } from './types.ts'
+import { textOf } from './loop-utils.ts'
 
 export type { TeamSkillKnowledgeSelection } from './types.ts'
 
@@ -82,14 +83,6 @@ export class TeamSkillKnowledgeLoop {
  */
 export function knowledgeSearchEvents(session: Session): readonly SessionEvent<'knowledge-search'>[] {
   return session.events.filter((event): event is SessionEvent<'knowledge-search'> => event.type === 'knowledge-search')
-}
-
-function textOf(message: { readonly content: readonly { readonly type: string; readonly text?: string }[] }): string | undefined {
-  const text = message.content
-    .filter(block => block.type === 'text')
-    .map(block => block.text ?? '')
-    .join('')
-  return text.length === 0 ? undefined : text
 }
 
 function toSessionEvent(

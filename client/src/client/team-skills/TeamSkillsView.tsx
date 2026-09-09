@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   ClientRemote,
   TeamSkillCatalogItem,
@@ -30,8 +30,6 @@ export interface TeamSkillsViewProps {
   readonly onProjectSelect?: (projectId: string) => void
   /** Local dependency facts sent to the Host without paths or values. */
   readonly environment: TeamSkillEnvironment
-  /** Server-authoritative Skill identifiers visible in the selected project. */
-  readonly visibleSkillIds: readonly string[]
   /** Refresh the Host account when the service reports an authorization failure. */
   readonly onAuthorizationFailure?: () => void
 }
@@ -56,7 +54,6 @@ export function TeamSkillsView({
   projects,
   onProjectSelect,
   environment,
-  visibleSkillIds,
   onAuthorizationFailure,
 }: TeamSkillsViewProps) {
   const workspaces = useWorkspaces(state => state.items)
@@ -67,25 +64,33 @@ export function TeamSkillsView({
   const [scope, setScope] = useState<Scope>('project')
   const [installing, setInstalling] = useState<string | undefined>()
   const [operationMessage, setOperationMessage] = useState<string | undefined>()
+  const requestGeneration = useRef(0)
+  const activeRequest = useRef<AbortController | undefined>()
 
   const load = async (): Promise<void> => {
+    activeRequest.current?.abort()
+    const controller = new AbortController()
+    activeRequest.current = controller
+    const generation = ++requestGeneration.current
+    const current = (): boolean => generation === requestGeneration.current && !controller.signal.aborted
     if (projectId === undefined) {
-      setState({ status: 'project-required' })
+      if (current()) setState({ status: 'project-required' })
       return
     }
     const selectedProjectId = projectId
-    setState({ status: 'loading' })
+    if (current()) setState({ status: 'loading' })
     const [catalogResult, installationsResult] = await Promise.all([
       remote.teamSkills.catalog(selectedProjectId),
       remote.teamSkills.syncReleaseStatus(selectedProjectId),
     ])
+    if (!current()) return
     if (!catalogResult.ok) {
       if (isAuthorizationFailure(catalogResult.error.code)) onAuthorizationFailure?.()
       setState({ status: 'error', title: '团队 Skill 暂不可用', message: catalogResult.error.message })
       return
     }
     if (catalogResult.value.status !== 'ready') {
-      if (catalogResult.value.status === 'failed' && isAuthorizationFailure(catalogResult.value.code)) onAuthorizationFailure?.()
+      if (isAuthorizationResult(catalogResult.value)) onAuthorizationFailure?.()
       setState({ status: 'error', title: '团队 Skill 暂不可用', message: catalogMessage(catalogResult.value) })
       return
     }
@@ -95,8 +100,7 @@ export function TeamSkillsView({
       return
     }
     if (!isInstallationList(installationsResult.value)) {
-      if (installationsResult.value.status === 'failed' && isAuthorizationFailure(installationsResult.value.code))
-        onAuthorizationFailure?.()
+      if (isAuthorizationResult(installationsResult.value)) onAuthorizationFailure?.()
       setState({ status: 'error', title: '无法读取本地安装状态', message: localInstallationMessage(installationsResult.value) })
       return
     }
@@ -105,17 +109,19 @@ export function TeamSkillsView({
 
   useEffect(() => {
     void load()
+    return () => {
+      activeRequest.current?.abort()
+    }
   }, [remote, projectId])
 
   const filtered = useMemo(() => {
     if (state.status !== 'ready') return []
     const normalized = query.trim().toLocaleLowerCase()
-    const visible = state.items.filter(item => visibleSkillIds.includes(item.skillId))
-    if (!normalized) return visible
-    return visible.filter(item =>
+    if (!normalized) return state.items
+    return state.items.filter(item =>
       `${item.displayName}${item.summary}${item.category}${item.tags.join('')}`.toLocaleLowerCase().includes(normalized),
     )
-  }, [query, state, visibleSkillIds])
+  }, [query, state])
 
   const installedFor = (item: TeamSkillCatalogItem): TeamSkillInstallationView | undefined => {
     if (state.status !== 'ready') return undefined
@@ -126,6 +132,7 @@ export function TeamSkillsView({
     if (selected === undefined || installing !== undefined) return
     if (projectId === undefined) return
     const selectedProjectId = projectId
+    const generation = requestGeneration.current
     if (scope === 'project' && workspaces[0] === undefined) return
     setInstalling(selected.skillId)
     setOperationMessage(undefined)
@@ -137,6 +144,7 @@ export function TeamSkillsView({
       ...(scope === 'project' && workspaces[0] !== undefined ? { workspaceId: workspaces[0].workspaceId } : {}),
       environment,
     })
+    if (generation !== requestGeneration.current) return
     setInstalling(undefined)
     if (!result.ok) {
       if (isAuthorizationFailure(result.error.code)) onAuthorizationFailure?.()
@@ -145,6 +153,11 @@ export function TeamSkillsView({
     }
     if (result.value.status === 'not-ready') {
       setOperationMessage(`安装失败：服务端未就绪，缺少配置：${result.value.missing.join('、')}`)
+      return
+    }
+    if (result.value.status === 'signed-out') {
+      onAuthorizationFailure?.()
+      setOperationMessage('安装失败：登录状态已失效，请重新登录')
       return
     }
     if (result.value.status === 'failed') {
@@ -169,9 +182,11 @@ export function TeamSkillsView({
 
   const uninstall = async (installation: TeamSkillInstallationView): Promise<void> => {
     if (installing !== undefined) return
+    const generation = requestGeneration.current
     setInstalling(installation.localInstallationId)
     setOperationMessage(undefined)
     const result = await remote.teamSkills.uninstallSkill({ localInstallationId: installation.localInstallationId })
+    if (generation !== requestGeneration.current) return
     setInstalling(undefined)
     if (!result.ok) {
       if (isAuthorizationFailure(result.error.code)) onAuthorizationFailure?.()
@@ -357,7 +372,7 @@ export function TeamSkillsView({
       {view === 'installed' && (
         <div className={css.grid}>
           {state.installations
-            .filter(item => item.state !== 'uninstalled' && visibleSkillIds.includes(item.skillId))
+            .filter(item => item.state !== 'uninstalled')
             .map((item) => {
               const catalogItem = state.items.find(value => value.skillId === item.skillId)
               return (
@@ -481,26 +496,43 @@ export function TeamSkillsView({
 function catalogMessage(
   value:
     | { readonly status: 'not-ready'; readonly missing: readonly string[] }
-    | { readonly status: 'failed'; readonly code: string; readonly message: string },
+    | { readonly status: 'failed'; readonly code: string; readonly message: string }
+    | { readonly status: 'signed-out' },
 ): string {
-  return value.status === 'not-ready' ? `服务端未就绪，缺少配置：${value.missing.join('、')}` : value.message
+  if (value.status === 'not-ready') return `服务端未就绪，缺少配置：${value.missing.join('、')}`
+  if (value.status === 'signed-out') return '登录状态已失效，请重新登录'
+  return value.message
 }
 
 function localInstallationMessage(
   value:
     | { readonly status: 'not-ready'; readonly missing: readonly string[] }
-    | { readonly status: 'failed'; readonly code: string; readonly message: string },
+    | { readonly status: 'failed'; readonly code: string; readonly message: string }
+    | { readonly status: 'signed-out' },
 ): string {
-  return value.status === 'not-ready' ? `本地安装状态未就绪：${value.missing.join('、')}` : value.message
+  if (value.status === 'not-ready') return `本地安装状态未就绪：${value.missing.join('、')}`
+  if (value.status === 'signed-out') return '登录状态已失效，请重新登录'
+  return value.message
 }
 
 function isInstallationList(
   value:
     | readonly TeamSkillInstallationView[]
     | { readonly status: 'not-ready'; readonly missing: readonly string[] }
-    | { readonly status: 'failed'; readonly code: string; readonly message: string },
+    | { readonly status: 'failed'; readonly code: string; readonly message: string }
+    | { readonly status: 'signed-out' },
 ): value is readonly TeamSkillInstallationView[] {
   return Array.isArray(value)
+}
+
+/** Whether the Host result requires the caller to restore the account session. */
+function isAuthorizationResult(
+  value:
+    | { readonly status: 'not-ready'; readonly missing: readonly string[] }
+    | { readonly status: 'failed'; readonly code: string; readonly message: string }
+    | { readonly status: 'signed-out' },
+): boolean {
+  return value.status === 'signed-out' || (value.status === 'failed' && isAuthorizationFailure(value.code))
 }
 
 function isAuthorizationFailure(code: string): boolean {

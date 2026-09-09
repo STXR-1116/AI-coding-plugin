@@ -1,6 +1,7 @@
 /** HTTP client for the AI Coding service Team Skill API. */
 
 import { randomUUID } from 'node:crypto'
+import type { TelemetryBatchRequest, TelemetryBatchResult, TelemetryEventAck, TelemetryEventDto } from './types.ts'
 import type {
   TeamSkillAccessSummary,
   TeamSkillAccountMembership,
@@ -141,8 +142,7 @@ export class TeamSkillAccountHttpClient {
     accessToken: string,
   ): Promise<{ readonly user: TeamSkillAccountUser; readonly memberships: readonly TeamSkillAccountMembership[] }> {
     const record = requireRecord(await this.request('/me', { method: 'GET' }, accessToken), 'account summary')
-    const userRecord = recordOf(record.user) ?? record
-    return { user: parseAccountUser(userRecord), memberships: parseMemberships(record.memberships) }
+    return { user: parseAccountUser(requireRecord(record.user, 'account user')), memberships: parseMemberships(record.memberships) }
   }
 
   /** Read one service-authoritative access summary across all organizations.
@@ -197,21 +197,7 @@ export class TeamSkillAccountHttpClient {
   }
 
   private async request(path: string, init: RequestInit, accessToken?: string): Promise<unknown> {
-    const headers: Record<string, string> = { accept: 'application/json' }
-    if (accessToken !== undefined) headers.authorization = `Bearer ${accessToken}`
-    if (init.body !== undefined) headers['content-type'] = 'application/json'
-    if (init.headers !== undefined)
-      new Headers(init.headers).forEach((value, key) => {
-        headers[key] = value
-      })
-    const response = await this.fetch(`${this.baseUrl}${path}`, { ...init, headers })
-    if (!response.ok) throw await accountErrorOf(response)
-    if (response.status === 204) return undefined
-    try {
-      return await response.json()
-    } catch {
-      throw new TeamSkillHttpError('SERVICE_PROTOCOL_ERROR', 'AI Coding service returned an invalid JSON response.')
-    }
+    return requestJson(this.fetch, this.baseUrl, path, init, accessToken)
   }
 }
 
@@ -246,6 +232,30 @@ export class TeamSkillHttpClient {
   async catalog(projectId: string): Promise<TeamSkillCatalog> {
     const body = await this.request(`/team-skills?project_id=${encodeURIComponent(projectId)}`, { method: 'GET' })
     return parseCatalog(body)
+  }
+
+  /** Deliver one telemetry batch with per-event classification.
+   * @param request - Batch body and the idempotency key derived from its batch id.
+   * @param timeoutMs - Hard client-side delivery timeout.
+   * @returns Server per-event results; unknown payload shapes throw instead of passing.
+   */
+  async telemetryBatches(request: TelemetryBatchRequest, timeoutMs: number): Promise<TelemetryBatchResult> {
+    const body = await this.request(
+      '/telemetry/batches',
+      {
+        method: 'POST',
+        headers: { 'Idempotency-Key': `telemetry-batch:${request.batchId}` },
+        body: JSON.stringify({
+          schema_version: request.schemaVersion,
+          batch_id: request.batchId,
+          project_id: request.projectId,
+          client_sent_at: request.clientSentAt,
+          events: request.events.map(serializeTelemetryEvent),
+        }),
+        signal: AbortSignal.timeout(timeoutMs),
+      },
+    )
+    return parseTelemetryBatchResult(body, request.batchId)
   }
 
   /** Read the current project knowledge-base summaries.
@@ -446,14 +456,7 @@ export class TeamSkillHttpClient {
 
   private async memoryRequest(path: string, init: RequestInit): Promise<unknown> {
     const base = this.options.apiBaseUrl.replace(/\/v1\/?$/u, '/v3').replace(/\/$/u, '')
-    const headers: Record<string, string> = { authorization: `Bearer ${this.options.accessToken}` }
-    new Headers(init.headers).forEach((value, key) => {
-      headers[key] = value
-    })
-    if (init.body !== undefined) headers['content-type'] = 'application/json'
-    const response = await this.fetch(`${base}${path}`, { ...init, headers })
-    if (!response.ok) throw await this.errorOf(response)
-    return response.status === 204 ? undefined : response.json()
+    return requestJson(this.fetch, base, path, init, this.options.accessToken)
   }
 
   /** Read publication state for installed versions before local discovery is refreshed.
@@ -518,7 +521,7 @@ export class TeamSkillHttpClient {
    */
   async download(url: string): Promise<Uint8Array> {
     const response = await this.fetch(url, { headers: this.headers() })
-    if (!response.ok) throw await this.errorOf(response)
+    if (!response.ok) throw await errorOf(response)
     return new Uint8Array(await response.arrayBuffer())
   }
 
@@ -546,61 +549,60 @@ export class TeamSkillHttpClient {
   }
 
   private async request(path: string, init: RequestInit): Promise<unknown> {
-    const headers: Record<string, string> = { authorization: `Bearer ${this.options.accessToken}` }
-    if (init.headers !== undefined) {
-      new Headers(init.headers).forEach((value, key) => {
-        headers[key] = value
-      })
-    }
-    if (init.body !== undefined) headers['content-type'] = 'application/json'
-    const response = await this.fetch(`${this.options.apiBaseUrl.replace(/\/$/u, '')}${path}`, {
-      ...init,
-      headers,
-    })
-    if (!response.ok) throw await this.errorOf(response)
-    if (response.status === 204) return undefined
-    try {
-      return await response.json()
-    } catch {
-      throw new TeamSkillHttpError('SERVICE_PROTOCOL_ERROR', 'AI Coding service returned an invalid JSON response.')
-    }
+    return requestJson(this.fetch, this.options.apiBaseUrl.replace(/\/$/u, ''), path, init, this.options.accessToken)
   }
 
   private headers(): HeadersInit {
     return { authorization: `Bearer ${this.options.accessToken}` }
   }
-
-  private async errorOf(response: Response): Promise<TeamSkillHttpError> {
-    let body: unknown
-    try {
-      body = await response.json()
-    } catch {
-      return new TeamSkillHttpError(`HTTP_${response.status}`, `AI Coding service returned HTTP ${response.status}.`)
-    }
-    const record = recordOf(body)
-    const code = typeof record?.code === 'string' ? record.code : `HTTP_${response.status}`
-    const message = typeof record?.message === 'string' ? record.message : `AI Coding service returned HTTP ${response.status}.`
-    return new TeamSkillHttpError(code, message)
-  }
 }
 
-async function accountErrorOf(response: Response): Promise<TeamSkillHttpError> {
+async function requestJson(
+  fetcher: typeof globalThis.fetch,
+  baseUrl: string,
+  path: string,
+  init: RequestInit,
+  accessToken?: string,
+): Promise<unknown> {
+  const headers: Record<string, string> = { accept: 'application/json' }
+  if (accessToken !== undefined) headers.authorization = `Bearer ${accessToken}`
+  if (init.body !== undefined) headers['content-type'] = 'application/json'
+  if (init.headers !== undefined) {
+    new Headers(init.headers).forEach((value, key) => {
+      headers[key] = value
+    })
+  }
+  const response = await fetcher(`${baseUrl}${path}`, { ...init, headers })
+  if (!response.ok) throw await errorOf(response)
+  if (response.status === 204) return undefined
   let body: unknown
   try {
     body = await response.json()
   } catch {
-    return new TeamSkillHttpError(`HTTP_${response.status}`, `AI Coding service returned HTTP ${response.status}.`)
+    throw new TeamSkillHttpError('SERVICE_PROTOCOL_ERROR', 'AI Coding service returned invalid JSON.')
+  }
+  return unwrapSuccessEnvelope(body)
+}
+
+async function errorOf(response: Response): Promise<TeamSkillHttpError> {
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch {
+    return new TeamSkillHttpError('SERVICE_PROTOCOL_ERROR', 'AI Coding service returned invalid JSON error response.')
   }
   const record = recordOf(body)
-  const nested = recordOf(record?.error)
-  const code = typeof nested?.code === 'string' ? nested.code : typeof record?.code === 'string' ? record.code : `HTTP_${response.status}`
-  const message =
-    typeof nested?.message === 'string'
-      ? nested.message
-      : typeof record?.message === 'string'
-        ? record.message
-        : `AI Coding service returned HTTP ${response.status}.`
-  return new TeamSkillHttpError(code, message)
+  if (
+    record === undefined ||
+    !Object.hasOwn(record, 'data') ||
+    record.data !== null ||
+    (typeof record.code !== 'string' && typeof record.code !== 'number') ||
+    typeof record.message !== 'string' ||
+    typeof record.request_id !== 'string'
+  ) {
+    return new TeamSkillHttpError('SERVICE_PROTOCOL_ERROR', 'AI Coding service returned an invalid error envelope.')
+  }
+  return new TeamSkillHttpError(String(record.code), record.message)
 }
 
 function parseAccountSession(value: unknown): TeamSkillAccountSessionResponse {
@@ -773,8 +775,15 @@ function parseKnowledgeSearch(value: unknown): TeamSkillKnowledgeSearchResponse 
 }
 
 function memoryData(value: unknown): Record<string, unknown> {
-  const outer = requireRecord(value, 'project memory response')
-  return requireRecord(outer.data ?? outer, 'project memory data')
+  return requireRecord(value, 'project memory data')
+}
+
+function unwrapSuccessEnvelope(value: unknown): unknown {
+  const record = requireRecord(value, 'success response')
+  if (!Object.hasOwn(record, 'data')) throw new TeamSkillHttpError('SERVICE_PROTOCOL_ERROR', 'AI Coding service returned a response without data.')
+  if ((typeof record.code !== 'number' && typeof record.code !== 'string') || typeof record.message !== 'string' || typeof record.request_id !== 'string')
+    throw new TeamSkillHttpError('SERVICE_PROTOCOL_ERROR', 'AI Coding service returned an invalid response envelope.')
+  return record.data
 }
 
 function parseMemory(value: unknown): TeamSkillMemory {
@@ -855,7 +864,14 @@ function parseMemoryJob(value: unknown): TeamSkillMemoryJob {
   const record = requireRecord(value, 'memory job')
   const kind = record.kind
   const status = record.status
-  if (kind !== 'CAPTURE' && kind !== 'INDEX_REFRESH' && kind !== 'DELETE_CLEANUP' && kind !== 'SCOPE_MOVED')
+  if (
+    kind !== 'CAPTURE' &&
+    kind !== 'INDEX_REFRESH' &&
+    kind !== 'DELETE_CLEANUP' &&
+    kind !== 'PROJECT_PROVISION' &&
+    kind !== 'POLICY_UPDATE' &&
+    kind !== 'PROJECT_PURGE'
+  )
     throw new TeamSkillHttpError('SERVICE_PROTOCOL_ERROR', 'AI Coding service returned invalid memory job kind.')
   if (status !== 'PENDING' && status !== 'SUCCEEDED' && status !== 'FAILED')
     throw new TeamSkillHttpError('SERVICE_PROTOCOL_ERROR', 'AI Coding service returned invalid memory job status.')
@@ -879,7 +895,7 @@ function parseMemoryJob(value: unknown): TeamSkillMemoryJob {
 function parseMemoryAudit(value: unknown): TeamSkillMemoryAudit {
   const record = requireRecord(value, 'memory audit record')
   const role = record.role
-  if (role !== 'admin' && role !== 'manager' && role !== 'member')
+  if (role !== 'admin' && role !== 'manager' && role !== 'member' && role !== 'system')
     throw new TeamSkillHttpError('SERVICE_PROTOCOL_ERROR', 'AI Coding service returned invalid memory audit role.')
   return {
     auditId: requireString(record.audit_id, 'memory audit_id'),
@@ -893,8 +909,108 @@ function parseMemoryAudit(value: unknown): TeamSkillMemoryAudit {
   }
 }
 
-function parseAsset(value: unknown): TeamSkillAsset {
-  const record = requireRecord(value, 'asset')
+/** Wire serialization of one structured event; undefined optional fields are omitted, observed nulls stay. */
+function serializeTelemetryEvent(event: TelemetryEventDto): Record<string, unknown> {
+  return {
+    schema_version: event.schemaVersion,
+    event_id: event.eventId,
+    installation_id: event.installationId,
+    project_id: event.projectId,
+    session_id: event.sessionId,
+    kind: event.kind,
+    occurred_at: event.occurredAt,
+    source_type: event.sourceType,
+    ...(event.sourceSeq === undefined ? {} : { source_seq: event.sourceSeq }),
+    ...(event.turn === undefined ? {} : { turn: event.turn }),
+    ...(event.step === undefined ? {} : { step: event.step }),
+    ...(event.durationMs === undefined ? {} : { duration_ms: event.durationMs }),
+    ...(event.outcome === undefined ? {} : { outcome: event.outcome }),
+    ...(event.provider === undefined ? {} : { provider: event.provider }),
+    ...(event.model === undefined ? {} : { model: event.model }),
+    ...(event.toolName === undefined ? {} : { tool_name: event.toolName }),
+    ...(event.toolCategory === undefined ? {} : { tool_category: event.toolCategory }),
+    ...(event.callId === undefined ? {} : { call_id: event.callId }),
+    ...(event.approvalId === undefined ? {} : { approval_id: event.approvalId }),
+    ...(event.compactionId === undefined ? {} : { compaction_id: event.compactionId }),
+    ...(event.retryable === undefined ? {} : { retryable: event.retryable }),
+    ...(event.retryCount === undefined ? {} : { retry_count: event.retryCount }),
+    ...(event.tokenUsage === undefined
+      ? {}
+      : {
+        token_usage: {
+          input_tokens: event.tokenUsage.inputTokens,
+          output_tokens: event.tokenUsage.outputTokens,
+          total_tokens: event.tokenUsage.totalTokens,
+        },
+      }),
+    ...(event.error === undefined
+      ? {}
+      : {
+        error: {
+          name: event.error.name,
+          ...(event.error.code === undefined ? {} : { code: event.error.code }),
+          ...(event.error.summary === undefined ? {} : { summary: event.error.summary }),
+        },
+      }),
+    ...(event.approval === undefined
+      ? {}
+      : {
+        approval: {
+          ...(event.approval.decision === undefined ? {} : { decision: event.approval.decision }),
+        },
+      }),
+    ...(event.compaction === undefined
+      ? {}
+      : {
+        compaction: {
+          ...(event.compaction.kind === undefined ? {} : { kind: event.compaction.kind }),
+        },
+      }),
+    ...(event.gap === undefined
+      ? {}
+      : {
+        gap: {
+          reason: event.gap.reason,
+          count: event.gap.count,
+          ...(event.gap.firstEventId === undefined ? {} : { first_event_id: event.gap.firstEventId }),
+          ...(event.gap.lastEventId === undefined ? {} : { last_event_id: event.gap.lastEventId }),
+        },
+      }),
+  }
+}
+
+/** Strict parse of the batch response; unknown payloads are protocol errors, never silent successes. */
+function parseTelemetryBatchResult(value: unknown, expectedBatchId: string): TelemetryBatchResult {
+  const record = requireRecord(value, 'telemetry batch result')
+  const batchId = requireString(record.batch_id, 'telemetry batch_id')
+  if (batchId !== expectedBatchId) {
+    throw new TeamSkillHttpError('SERVICE_PROTOCOL_ERROR', 'AI Coding service returned a telemetry batch id that does not match the request.')
+  }
+  const results = requireArray(record.results, 'telemetry batch results').map((entry): TelemetryEventAck => {
+    const item = requireRecord(entry, 'telemetry batch result item')
+    const eventId = requireString(item.event_id, 'telemetry event_id')
+    const status = item.status
+    if (status === 'accepted') return { eventId, status }
+    if (status === 'duplicate') return { eventId, status }
+    if (status === 'retryable')
+      return {
+        eventId,
+        status,
+        retryAfterSeconds: requireNumber(item.retry_after_seconds, 'telemetry retry_after_seconds'),
+        reason: requireString(item.reason, 'telemetry retryable reason'),
+      }
+    if (status === 'rejected') return { eventId, status, reason: requireString(item.reason, 'telemetry rejected reason') }
+    throw new TeamSkillHttpError('SERVICE_PROTOCOL_ERROR', 'AI Coding service returned an invalid telemetry event status.')
+  })
+  return Object.freeze({
+    batchId,
+    serverReceivedAt: requireString(record.server_received_at, 'telemetry server_received_at'),
+    serverCheckpoint: requireString(record.server_checkpoint, 'telemetry server_checkpoint'),
+    results: Object.freeze(results),
+  })
+}
+
+function parseAsset(value: unknown): TeamSkillAsset {  const record = requireRecord(value, 'asset')
   const assetType = record.asset_type
   const visibility = record.visibility
   if (assetType !== 'project' && assetType !== 'skill' && assetType !== 'knowledge' && assetType !== 'memory')

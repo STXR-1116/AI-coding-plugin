@@ -9,7 +9,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-skill'
-import { TeamSkillHost } from './host.ts'
+import { STATIC_TOKEN_PARTITION, TeamSkillHost } from './host.ts'
 import type {
   TeamSkillCatalogResult,
   TeamSkillAccessSummary,
@@ -40,6 +40,25 @@ import type {
 import { TeamSkillKnowledgeLoop } from './knowledge-loop.ts'
 import type { TeamSkillKnowledgeSelection } from './knowledge-loop.ts'
 import { TeamSkillMemoryLoop } from './memory-loop.ts'
+import { CollectorController, TeamSkillTelemetryBackend } from './telemetry/backend.ts'
+import type { CollectorSnapshot } from './types.ts'
+import { TelemetryQueue, TelemetryStorageError } from './telemetry/queue.ts'
+import { TelemetryReporter } from './telemetry/reporter.ts'
+import { resolveTelemetrySettings } from './telemetry/settings.ts'
+import type { CollectorResult, TelemetryQueueSettings } from './types.ts'
+
+/** Deployment-owned collector queue settings for the AI Coding profile. */
+export interface TelemetryCollectorConfig {
+  readonly maxEvents?: number
+  readonly maxBytes?: number
+  readonly batchMaxEvents?: number
+  readonly batchMaxBytes?: number
+  readonly flushIntervalMs?: number
+  readonly httpTimeoutMs?: number
+  readonly maxAttempts?: number
+  readonly retentionMs?: number
+  readonly claimTimeoutMs?: number
+}
 
 /** Deployment-owned Team Skill Host configuration. */
 export interface Config {
@@ -51,6 +70,8 @@ export interface Config {
   readonly stateDirectory: string
   /** Native DSH global Skill discovery directory. */
   readonly globalSkillRoot: string
+  /** Collector queue settings; every omitted field uses the validated default. */
+  readonly telemetry?: TelemetryCollectorConfig
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -62,13 +83,24 @@ declare module '@deepseek-ai/cordis' {
 
 /** Host service that exposes Team Skill operations through the typed Remote gateway. */
 export class TeamSkillGateway extends TypertRemoteService {
-  static inject = ['skills', 'workspaceRegistry', 'agents']
+  static inject = ['skills', 'workspaceRegistry', 'agents', 'sessions']
 
   static Config: Schema<Config> = z.object({
     apiBaseUrl: z.string(),
     accessToken: z.string(),
     stateDirectory: z.string().required(),
     globalSkillRoot: z.string().required(),
+    telemetry: z.object({
+      maxEvents: z.number(),
+      maxBytes: z.number(),
+      batchMaxEvents: z.number(),
+      batchMaxBytes: z.number(),
+      flushIntervalMs: z.number(),
+      httpTimeoutMs: z.number(),
+      maxAttempts: z.number(),
+      retentionMs: z.number(),
+      claimTimeoutMs: z.number(),
+    }),
   })
 
   private readonly host: TeamSkillHost
@@ -76,6 +108,10 @@ export class TeamSkillGateway extends TypertRemoteService {
   private readonly knowledgeLoop: TeamSkillKnowledgeLoop
   private readonly memoryProjects = new WeakMap<Agent, string>()
   private readonly memoryLoop: TeamSkillMemoryLoop
+  private readonly collector: CollectorController
+  private collectorBackend: TeamSkillTelemetryBackend | undefined
+  private readonly collectorSettings: TelemetryQueueSettings
+  private readonly collectorStaticPartition: string | undefined
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'teamSkills')
@@ -92,6 +128,11 @@ export class TeamSkillGateway extends TypertRemoteService {
           skill => skill.name === runtimeName,
         ) === expectedPresent,
     })
+    this.collectorSettings = resolveTelemetrySettings(config.telemetry)
+    this.collectorStaticPartition = config.accessToken !== undefined && config.accessToken.length > 0 ? STATIC_TOKEN_PARTITION : undefined
+    this.collector = this.buildCollector(ctx, config)
+    this.collectorBackend?.setAccount({ status: 'signed-out' })
+    this.refreshCollectorAccount()
     this.knowledgeLoop = new TeamSkillKnowledgeLoop(ctx, {
       resolveSelection: agent => this.knowledgeSelections.get(agent),
       search: (request, signal) =>
@@ -130,6 +171,7 @@ export class TeamSkillGateway extends TypertRemoteService {
     ctx.on('agent/disposed', ({ agent }) => {
       this.knowledgeSelections.delete(agent)
       this.memoryProjects.delete(agent)
+      this.collectorBackend?.clearProject(String(agent.session.id))
     })
     ctx.effect(
       () => () => {
@@ -138,6 +180,111 @@ export class TeamSkillGateway extends TypertRemoteService {
       },
       'ai-coding-platform: knowledge and memory loops',
     )
+    // 构造期注册销毁 effect，并保留 Cordis 返回的 disposer：fiber 卸载或显式
+    // 调用都会触发同一销毁路径（Cordis disposer 双调幂等）。
+    this.collectorDisposeEffect = ctx.effect(
+      () => async () => {
+        await this.disposeCollector()
+      },
+      'ai-coding-platform: telemetry queue close',
+    )
+  }
+
+  /**
+   * Assemble the single collector pipeline: durable queue, background
+   * reporter, and the one `sessionTelemetry` backend. A queue that cannot be
+   * opened or validated leaves the collector in `storage-error` mode instead
+   * of silently dropping the feature or rebuilding local state.
+   */
+  private buildCollector(ctx: Context, config: Config): CollectorController {
+    try {
+      const queue = TelemetryQueue.open(config.stateDirectory, this.collectorSettings)
+      this.collectorQueueHandle = queue
+      const reporter = new TelemetryReporter(queue, this.collectorSettings, {
+        // Without an endpoint the reporter reports `not-ready`; with one, delivery
+        // failures come back as explicit outcomes from the Host request layer.
+        send:
+          config.apiBaseUrl === undefined
+            ? undefined
+            : (batch, accountId) => this.host.telemetryDeliver(batch, this.collectorSettings.httpTimeoutMs, accountId),
+        resolveAccount: async () => {
+          const account = await this.host.telemetryAccount()
+          if ('userId' in account) return account
+          // 仅确认无登录态（signed-out）时才允许静态分区兜底；not-ready（凭据
+          // 读取/刷新异常）必须停止并保留队列，绝不改用其他身份发送。
+          if (account.status === 'signed-out' && this.collectorStaticPartition !== undefined) {
+            return { userId: this.collectorStaticPartition }
+          }
+          return account
+        },
+      })
+      reporter.start()
+      this.collectorBackend = new TeamSkillTelemetryBackend(
+        ctx,
+        queue,
+        reporter,
+        (sessionId: string) => ctx.agents.get(SessionId(sessionId)) !== undefined,
+      )
+      return new CollectorController({ queue, reporter, backend: this.collectorBackend }, [], null)
+    } catch (error) {
+      const message = error instanceof TelemetryStorageError ? error.message : `telemetry queue unusable: ${String(error)}`
+      return CollectorController.storageError(message, [])
+    }
+  }
+
+  /** Close the telemetry queue after the reporter's final drain; idempotent. */
+  async disposeCollector(): Promise<void> {
+    if (this.collectorDisposed) return
+    this.collectorDisposed = true
+    await this.collectorBackend?.shutdown()
+    this.collectorQueueHandle?.close()
+    this.collectorQueueHandle = undefined
+  }
+
+  private collectorDisposed = false
+
+  /** Cordis effect disposer registered at construction; idempotent, awaitable. */
+  readonly collectorDisposeEffect: () => Promise<void> | void
+
+  private collectorQueueHandle: import('./telemetry/queue.ts').TelemetryQueue | undefined
+
+  /** Re-read the capture-time account partition and publish it to the collector. */
+  private async refreshCollectorAccountAsync(): Promise<void> {
+    const backend = this.collectorBackend
+    if (backend === undefined) return
+    try {
+      const account = await this.host.telemetryAccount()
+      if ('userId' in account) {
+        backend.setAccount(account)
+        return
+      }
+      // 仅确认无登录态（signed-out）时静态 Token 部署回落到固定本地分区；
+      // not-ready（凭据异常）保持停止状态并保留队列。
+      backend.setAccount(
+        account.status === 'signed-out' && this.collectorStaticPartition !== undefined
+          ? { userId: this.collectorStaticPartition }
+          : account,
+      )
+    } catch {
+      backend.setAccount({ status: 'not-ready' })
+    }
+  }
+
+  /** Fire-and-forget account refresh for construction paths that must not await. */
+  private refreshCollectorAccount(): void {
+    void this.refreshCollectorAccountAsync()
+  }
+
+  /**
+   * Isolate capture while an authentication request is in flight: the backend
+   * account is published as `not-ready` BEFORE the credentials/HTTP operation
+   * starts, so events produced during the pending window are written to
+   * neither the old partition (no stale-attribution) nor the new one (no
+   * premature inheritance). The real state is published by
+   * {@link refreshCollectorAccountAsync} once the operation settles.
+   */
+  private isolateCollectorDuringAuth(): void {
+    this.collectorBackend?.setAccount({ status: 'not-ready' })
   }
 
   /** Select project knowledge bases for one live native DSH session. */
@@ -164,8 +311,13 @@ export class TeamSkillGateway extends TypertRemoteService {
    * @returns Browser-safe authenticated account state or an explicit failure.
    */
   @Remote('login')
-  login(request: TeamSkillLoginRequest): Promise<TeamSkillAccountResult<TeamSkillAccountState>> {
-    return this.host.login(request)
+  async login(request: TeamSkillLoginRequest): Promise<TeamSkillAccountResult<TeamSkillAccountState>> {
+    // 挂起窗口先隔离采集：认证未完成前不写旧账号，也不预写新账号。
+    this.isolateCollectorDuringAuth()
+    const result = await this.host.login(request)
+    // 登录/登出/刷新都必须同步发布采集账号变化，避免旧分区继续采集。
+    await this.refreshCollectorAccountAsync()
+    return result
   }
 
   /** Read the current browser-safe account state.
@@ -180,8 +332,12 @@ export class TeamSkillGateway extends TypertRemoteService {
    * @returns Replacement browser-safe account state or an explicit failure.
    */
   @Remote('refreshAccount')
-  refreshAccount(): Promise<TeamSkillAccountResult<TeamSkillAccountState>> {
-    return this.host.refreshAccount()
+  async refreshAccount(): Promise<TeamSkillAccountResult<TeamSkillAccountState>> {
+    // 挂起窗口先隔离采集：刷新未完成前事件不归属任何账号分区。
+    this.isolateCollectorDuringAuth()
+    const result = await this.host.refreshAccount()
+    await this.refreshCollectorAccountAsync()
+    return result
   }
 
   /** Change the current account password.
@@ -197,8 +353,12 @@ export class TeamSkillGateway extends TypertRemoteService {
    * @returns Signed-out account state.
    */
   @Remote('logout')
-  logout(): Promise<TeamSkillAccountResult<TeamSkillAccountState>> {
-    return this.host.logout()
+  async logout(): Promise<TeamSkillAccountResult<TeamSkillAccountState>> {
+    // 挂起窗口先隔离采集：登出请求未完成前旧账号立即停止采集。
+    this.isolateCollectorDuringAuth()
+    const result = await this.host.logout()
+    await this.refreshCollectorAccountAsync()
+    return result
   }
 
   /** Read the aggregate access summary across all organizations.
@@ -405,21 +565,124 @@ export class TeamSkillGateway extends TypertRemoteService {
     this.memoryProjects.delete(agent)
   }
 
-  /** Return local copies managed by this Host, or an explicit local-state error.
+  /** Read the collector pipeline status for the plugin page.
+   * @returns Browser-safe pipeline state or an explicit not-ready or failed state.
+   */
+  @Remote('collectorStatus')
+  async collectorStatus(): Promise<CollectorSnapshot> {
+    await this.refreshCollectorAccountAsync()
+    return this.collector.status()
+  }
+
+  /**
+   * Bind one live session to its active project for collector capture.
+   * Rebinding is authorized against the service before any local state moves:
+   * a failed or signed-out check keeps the previous binding untouched, so the
+   * A→B switch is atomic from the caller's perspective.
+   * @param sessionId - Live DSH session identity.
+   * @param projectId - Opaque authorized project identity.
+   * @returns The bound project or an explicit not-ready or failed state.
+   */
+  @Remote('configureCollectorProject')
+  async configureCollectorProject(sessionId: string, projectId: string): Promise<CollectorResult<{ readonly projectId: string }>> {
+    const agent = this.ctx.agents.get(SessionId(sessionId))
+    if (agent === undefined) return { status: 'failed', code: 'SESSION_NOT_LIVE', message: `会话 "${sessionId}" 不是存活的 Agent。` }
+    const backend = this.collectorBackend
+    if (backend === undefined) {
+      const snapshot = this.collector.status()
+      return snapshot.status === 'failed' ? snapshot : { status: 'not-ready', missing: ['telemetryStorage'] }
+    }
+    await this.refreshCollectorAccountAsync()
+    if (projectId.length === 0) {
+      backend.clearProject(sessionId)
+      return { status: 'ready', value: { projectId: '' } }
+    }
+    // 远程调用可绕过 UI 直接换绑：先经服务端确认当前账号对该项目仍然授权，
+    // 确认失败时保持原绑定，A→B 换绑要么完整生效要么完全不动。
+    const authorization = await this.host.project(projectId)
+    if ('project' in authorization) {
+      backend.configureProject(sessionId, projectId)
+      return { status: 'ready', value: { projectId } }
+    }
+    if (authorization.status === 'not-ready') {
+      return { status: 'not-ready', missing: authorization.missing }
+    }
+    if (authorization.status === 'signed-out') {
+      return { status: 'failed', code: 'ACCOUNT_SIGNED_OUT', message: '当前没有登录态账号，无法换绑采集项目。' }
+    }
+    return {
+      status: 'failed',
+      code: 'PROJECT_NOT_AUTHORIZED',
+      message: `当前账号未获项目 "${projectId}" 授权，采集绑定保持不变。`,
+    }
+  }
+
+  /** Clear the collector project binding of one live session.
+   * @param sessionId - Live DSH session identity.
+   * @returns An explicit ready or failed state.
+   */
+  @Remote('clearCollectorProject')
+  clearCollectorProject(sessionId: string): Promise<CollectorResult<{ readonly cleared: true }>> {
+    const agent = this.ctx.agents.get(SessionId(sessionId))
+    if (agent === undefined) {
+      return Promise.resolve({ status: 'failed', code: 'SESSION_NOT_LIVE', message: `会话 "${sessionId}" 不是存活的 Agent。` })
+    }
+    this.collectorBackend?.clearProject(sessionId)
+    return Promise.resolve({ status: 'ready', value: { cleared: true } })
+  }
+
+  /** Pause collector capture and delivery, keeping the queue.
+   * @returns The paused pipeline state.
+   */
+  @Remote('pauseCollector')
+  pauseCollector(): Promise<CollectorSnapshot> {
+    return Promise.resolve(this.collector.pause())
+  }
+
+  /** Resume collector capture and delivery.
+   * @returns The resumed pipeline state.
+   */
+  @Remote('resumeCollector')
+  resumeCollector(): Promise<CollectorSnapshot> {
+    return Promise.resolve(this.collector.resume())
+  }
+
+  /** Start an immediate asynchronous flush without waiting for the network.
+   * @returns The pipeline state at flush start.
+   */
+  @Remote('flushCollector')
+  flushCollector(): Promise<CollectorSnapshot> {
+    return Promise.resolve(this.collector.flush())
+  }
+
+  /** Delete all unreported collector data after user confirmation, recording a manual-clear gap.
+   * @returns The post-clear pipeline state or an explicit failure.
+   */
+  @Remote('clearPendingCollectorData')
+  async clearPendingCollectorData(): Promise<CollectorSnapshot> {
+    await this.refreshCollectorAccountAsync()
+    return this.collector.clearPending()
+  }
+
+  /** Return local copies managed by this Host, or an explicit signed-out or local-state error.
    * @param projectId - Opaque project identity reauthorized by the service.
-   * @returns Browser-safe local copies or an explicit local-state error.
+   * @returns Browser-safe local copies or an explicit signed-out or local-state error.
    */
   @Remote('installations')
-  installations(projectId: string): Promise<readonly TeamSkillInstallationView[] | TeamSkillNotReady | TeamSkillFailed> {
+  installations(
+    projectId: string,
+  ): Promise<readonly TeamSkillInstallationView[] | TeamSkillNotReady | TeamSkillFailed | { readonly status: 'signed-out' }> {
     return this.host.installations(projectId)
   }
 
   /** Synchronize local copies against server release state and isolate withdrawals.
    * @param projectId - Opaque project identity reauthorized by the service.
-   * @returns Updated local copies or an explicit unavailable or failed state.
+   * @returns Updated local copies or an explicit signed-out, unavailable, or failed state.
    */
   @Remote('syncReleaseStatus')
-  syncReleaseStatus(projectId: string): Promise<readonly TeamSkillInstallationView[] | TeamSkillNotReady | TeamSkillFailed> {
+  syncReleaseStatus(
+    projectId: string,
+  ): Promise<readonly TeamSkillInstallationView[] | TeamSkillNotReady | TeamSkillFailed | { readonly status: 'signed-out' }> {
     return this.host.syncReleaseStatus(projectId)
   }
 

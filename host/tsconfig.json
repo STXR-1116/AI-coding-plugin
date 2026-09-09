@@ -11,9 +11,12 @@
     { "path": "../../core/agent/tsconfig.json" },
     { "path": "../../llm/llm" },
     { "path": "../../core/session/tsconfig.json" },
+    { "path": "../../session/session-telemetry" },
     { "path": "../../skill/skill" },
     { "path": "../../credentials/credentials" },
     { "path": "../../typert/protocol" },
-    { "path": "../../workspace/workspace" }
+    { "path": "../../workspace/workspace" },
+    { "path": "../../util/atomic-write" },
+    { "path": "../../runtime-diagnostics/invariants" }
   ]
 }

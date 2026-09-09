@@ -15,8 +15,8 @@ export const name = 'client-ui-ai-coding-platform-invariant'
 export const inject = ['invariants']
 
 /**
- * The demo owns only local browser presentation state. Its behavior is
- * asserted by component tests rather than by a cross-plugin runtime event.
+ * No runtime invariant: the demo owns only local browser presentation state;
+ * its behavior is asserted by component tests rather than a cross-plugin event.
  */
 const install: InvariantInstaller = () => {}
 

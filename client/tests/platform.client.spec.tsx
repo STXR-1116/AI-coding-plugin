@@ -178,6 +178,18 @@ const demoWorkspaceState: WorkspaceListState = {
 
 const demoSessionState = { current: 'session-1', byId: { 'session-1': { blank: false } } }
 
+const demoCollectorStatus = {
+  mode: 'active' as const,
+  projectId: null,
+  queueEventCount: 0,
+  queueByteCount: 0,
+  lastAcceptedAt: null,
+  lastFailure: null,
+  gapCount: 0,
+  authorizationState: 'unknown' as const,
+  storageError: null,
+}
+
 function demoRemote(): ClientRemote {
   return {
     teamSkills: {
@@ -219,6 +231,25 @@ function demoRemote(): ClientRemote {
       })),
       configureProjectMemory: vi.fn(async () => ({ ok: true as const, value: undefined })),
       clearProjectMemory: vi.fn(async () => ({ ok: true as const, value: undefined })),
+      collectorStatus: vi.fn(async () => ({ ok: true as const, value: { status: 'ready' as const, value: demoCollectorStatus } })),
+      configureCollectorProject: vi.fn(async () => ({ ok: true as const, value: { projectId: 'orbit-ui' } })),
+      clearCollectorProject: vi.fn(async () => ({ ok: true as const, value: { cleared: true as const } })),
+      pauseCollector: vi.fn(async () => ({
+        ok: true as const,
+        value: { status: 'ready' as const, value: { ...demoCollectorStatus, mode: 'paused' as const } },
+      })),
+      resumeCollector: vi.fn(async () => ({
+        ok: true as const,
+        value: { status: 'ready' as const, value: { ...demoCollectorStatus, mode: 'active' as const } },
+      })),
+      flushCollector: vi.fn(async () => ({
+        ok: true as const,
+        value: { status: 'ready' as const, value: demoCollectorStatus },
+      })),
+      clearPendingCollectorData: vi.fn(async () => ({
+        ok: true as const,
+        value: { status: 'ready' as const, value: demoCollectorStatus },
+      })),
       configureKnowledgeSelection: vi.fn(async () => ({ ok: true as const, value: undefined })),
       clearKnowledgeSelection: vi.fn(async () => ({ ok: true as const, value: undefined })),
       accessSummary: vi.fn(async () => ({ ok: true, value: demoAccess })),
@@ -297,6 +328,37 @@ it('binds selected knowledge bases to the current native DSH session and clears 
   })
 })
 
+it('serializes project-memory binding changes so stale configuration cannot win', async () => {
+  const controller = new PlatformDemoController()
+  controller.open()
+  const remote = demoRemote()
+  let releaseFirst: (() => void) | undefined
+  const firstConfiguration = new Promise<void>((resolve) => {
+    releaseFirst = resolve
+  })
+  const configureProjectMemory = vi.fn(async (_sessionId: string, selectedProjectId: string) => {
+    if (selectedProjectId === 'orbit-ui' && configureProjectMemory.mock.calls.length === 1) await firstConfiguration
+    return { ok: true as const, value: undefined }
+  })
+  remote.teamSkills.configureProjectMemory = configureProjectMemory
+  mountSurface(controller, remote)
+
+  expect(await screen.findByRole('heading', { name: '从权限范围内的资产开始协作' })).toBeTruthy()
+  fireEvent.change(screen.getByLabelText('当前项目'), { target: { value: 'orbit-ui' } })
+  await waitFor(() => {
+    expect(remote.teamSkills.configureProjectMemory).toHaveBeenCalledWith('session-1', 'orbit-ui')
+  })
+  fireEvent.change(screen.getByLabelText('当前项目'), { target: { value: '' } })
+  fireEvent.change(screen.getByLabelText('当前项目'), { target: { value: 'orbit-ui' } })
+  await Promise.resolve()
+  expect(remote.teamSkills.configureProjectMemory).toHaveBeenCalledTimes(1)
+  releaseFirst?.()
+  await waitFor(() => {
+    expect(remote.teamSkills.configureProjectMemory).toHaveBeenCalledTimes(2)
+    expect(remote.teamSkills.clearProjectMemory).toHaveBeenCalledWith('session-1')
+  })
+})
+
 it('shows a configure rejection and does not retain a local knowledge binding', async () => {
   const controller = new PlatformDemoController()
   controller.open()
@@ -372,12 +434,32 @@ describe('AI Coding platform demo', () => {
     expect(await screen.findByRole('heading', { name: '登录你的编程协作台' })).toBeTruthy()
     expect(screen.queryByRole('heading', { name: '从权限范围内的资产开始协作' })).toBeNull()
 
-    fireEvent.change(screen.getByLabelText('工作邮箱'), { target: { value: 'member@example.com' } })
+    fireEvent.change(screen.getByLabelText('用户名或邮箱'), { target: { value: 'member@example.com' } })
     fireEvent.change(screen.getByLabelText('访问密码'), { target: { value: 'secret' } })
     fireEvent.click(screen.getByRole('button', { name: '登录' }))
     expect(await screen.findByRole('heading', { name: '从权限范围内的资产开始协作' })).toBeTruthy()
     expect(screen.queryByRole('heading', { name: '选择项目' })).toBeNull()
     expect(screen.queryByRole('heading', { name: '选择组织' })).toBeNull()
+  })
+
+  it('accepts a username as well as an email address at the account gate', async () => {
+    const controller = new PlatformDemoController()
+    controller.open()
+    render(
+      <PlatformSurface
+        {...({
+          controller,
+          t,
+          useSessions: (() => ({ current: undefined, byId: {} })) as never,
+          useWorkspaces: (<S,>(selector: (state: WorkspaceListState) => S): S => selector(demoWorkspaceState)) as never,
+          remote: signedOutRemote(),
+        } as PlatformSurfaceProps)}
+      />,
+    )
+
+    const accountInput = await screen.findByLabelText('用户名或邮箱')
+    expect(accountInput).toHaveProperty('type', 'text')
+    expect(accountInput).toHaveProperty('inputMode', 'text')
   })
 
   it('shows an explicit service error when access loading rejects', async () => {
@@ -445,8 +527,9 @@ describe('AI Coding platform demo', () => {
     expect((await screen.findAllByText('服务端记忆：稳定错误码必须保留。')).length).toBeGreaterThan(0)
 
     fireEvent.click(within(nav).getByRole('button', { name: '数据采集' }))
+    expect((await screen.findAllByText('采集中')).length).toBeGreaterThan(0)
     fireEvent.click(screen.getByRole('button', { name: '暂停采集' }))
-    expect(screen.getByText('已暂停')).toBeTruthy()
+    expect((await screen.findAllByText('已暂停')).length).toBeGreaterThan(0)
 
     fireEvent.click(within(nav).getByRole('button', { name: 'Agent 配置' }))
     expect(screen.getByRole('heading', { name: '管理云平台里的 Coding Agent' })).toBeTruthy()
@@ -482,7 +565,7 @@ describe('AI Coding platform demo', () => {
     expect((await screen.findAllByText('服务端记忆：稳定错误码必须保留。')).length).toBeGreaterThan(0)
   })
 
-  it('does not render a Team Skill outside the selected project access summary', async () => {
+  it('renders the server-authorized catalog as returned instead of filtering skills in the browser', async () => {
     const remote = demoRemote()
     remote.teamSkills.catalog = vi.fn(async () => ({
       ok: true as const,
@@ -515,7 +598,7 @@ describe('AI Coding platform demo', () => {
     fireEvent.click(screen.getByRole('button', { name: 'AI开放平台' }))
 
     expect(await screen.findByText('代码评审')).toBeTruthy()
-    expect(screen.queryByText('受限 Skill')).toBeNull()
+    expect(await screen.findByText('受限 Skill')).toBeTruthy()
   })
 
   it.each(['PROJECT_NOT_MEMBER', 'RESOURCE_NOT_FOUND', 'NO_ORGANIZATION_ACCESS'])(
@@ -559,7 +642,7 @@ describe('AI Coding platform demo', () => {
     fireEvent.click(await screen.findByRole('button', { name: '账号与权限：成员甲' }))
     fireEvent.click(screen.getByRole('button', { name: '退出登录' }))
     expect(await screen.findByRole('heading', { name: '登录你的编程协作台' })).toBeTruthy()
-    fireEvent.change(screen.getByLabelText('工作邮箱'), { target: { value: 'member@example.com' } })
+    fireEvent.change(screen.getByLabelText('用户名或邮箱'), { target: { value: 'member@example.com' } })
     fireEvent.change(screen.getByLabelText('访问密码'), { target: { value: 'secret' } })
     fireEvent.click(screen.getByRole('button', { name: '登录' }))
     expect(await screen.findByRole('heading', { name: '从权限范围内的资产开始协作' })).toBeTruthy()
@@ -609,6 +692,53 @@ it('loads project memories from the service and updates them with the server rev
   fireEvent.click(screen.getByRole('button', { name: '保存记忆' }))
   await waitFor(() => {
     expect(remote.teamSkills.memoryUpdate).toHaveBeenCalledWith({ memoryId: 'm-1', content: '服务端记忆已更新。', expectedRevision: 1 })
+  })
+  fireEvent.click(screen.getByRole('button', { name: '编辑记忆' }))
+  fireEvent.change(screen.getByRole('textbox', { name: '记忆正文' }), { target: { value: '服务端记忆二次更新。' } })
+  fireEvent.click(screen.getByRole('button', { name: '保存记忆' }))
+  await waitFor(() => {
+    expect(remote.teamSkills.memoryUpdate).toHaveBeenLastCalledWith({ memoryId: 'm-1', content: '服务端记忆二次更新。', expectedRevision: 2 })
+  })
+})
+
+it('does not let an older memory detail response replace the selected record', async () => {
+  const firstMemory = demoMemories[0]!
+  const secondMemory = {
+    ...firstMemory,
+    memoryId: 'm-2',
+    content: '第二条服务端记忆。',
+  }
+  const remote = demoRemote()
+  remote.teamSkills.memoryList = vi.fn(async () => ({
+    ok: true as const,
+    value: { items: [firstMemory, secondMemory], nextCursor: null, totalEstimate: 2 },
+  }))
+  let releaseFirst: (() => void) | undefined
+  const firstDetail = new Promise<void>((resolve) => {
+    releaseFirst = resolve
+  })
+  remote.teamSkills.memoryGet = vi.fn(async (memoryId: string) => {
+    if (memoryId === 'm-1') await firstDetail
+    return {
+      ok: true as const,
+      value: memoryId === 'm-1' ? firstMemory : secondMemory,
+    }
+  })
+  const controller = new PlatformDemoController()
+  controller.open()
+  mountSurface(controller, remote)
+  expect(await screen.findByRole('heading', { name: '从权限范围内的资产开始协作' })).toBeTruthy()
+  fireEvent.change(screen.getByLabelText('当前项目'), { target: { value: 'orbit-ui' } })
+  await waitFor(() => {
+    expect(screen.getByLabelText('当前项目')).toHaveProperty('value', 'orbit-ui')
+  })
+  fireEvent.click(within(screen.getByRole('navigation', { name: '平台模块' })).getByRole('button', { name: '记忆库' }))
+  expect((await screen.findAllByText(firstMemory.content)).length).toBeGreaterThan(0)
+  fireEvent.click(screen.getByRole('button', { name: new RegExp(firstMemory.content) }))
+  fireEvent.click(screen.getByRole('button', { name: new RegExp(secondMemory.content) }))
+  releaseFirst?.()
+  await waitFor(() => {
+    expect(screen.getAllByText(secondMemory.content).length).toBeGreaterThan(0)
   })
 })
 

@@ -5,7 +5,17 @@ import { credentialKey } from '@deepseek-ai/dsh-credentials'
 import type { CredentialKey, CredentialProvider } from '@deepseek-ai/dsh-credentials'
 
 function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+  const record = typeof body === 'object' && body !== null && !Array.isArray(body) ? body as Record<string, unknown> : undefined
+  const error = status >= 400
+  return new Response(
+    JSON.stringify({
+      code: error ? (typeof record?.code === 'string' ? record.code : `HTTP_${status}`) : 0,
+      message: error ? (typeof record?.message === 'string' ? record.message : 'failed') : 'ok',
+      request_id: 'test-request',
+      data: error ? null : body,
+    }),
+    { status, headers: { 'content-type': 'application/json' } },
+  )
 }
 
 describe('TeamSkillHost knowledge workflow', () => {
@@ -84,12 +94,17 @@ describe('TeamSkillHost knowledge workflow', () => {
       CredentialKey,
       {
         readonly kind: 'grant'
-        readonly payload: { readonly accessToken: string; readonly refreshToken: string; readonly expiresAt: number }
+        readonly payload: {
+          readonly userId: string
+          readonly accessToken: string
+          readonly refreshToken: string
+          readonly expiresAt: number
+        }
       }
     >()
     records.set(credentialKey('dsh-ai-coding-platform', 'account'), {
       kind: 'grant',
-      payload: { accessToken: 'expired', refreshToken: 'refresh-1', expiresAt: Date.now() + 60_000 },
+      payload: { userId: 'user-1', accessToken: 'expired', refreshToken: 'refresh-1', expiresAt: Date.now() + 60_000 },
     })
     const credentials = {
       readRecord: async (key: CredentialKey) => records.get(key),
