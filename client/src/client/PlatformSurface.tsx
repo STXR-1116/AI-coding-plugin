@@ -212,6 +212,13 @@ function PlatformShell({ controller, t, remote, layout, useSessions, useWorkspac
   const [knowledgeBoundCount, setKnowledgeBoundCount] = useState(0)
   const [knowledgeSearch, setKnowledgeSearch] = useState<TeamSkillKnowledgeSearchResponse | undefined>()
   const [knowledgePreview, setKnowledgePreview] = useState<TeamSkillKnowledgePreview | undefined>()
+  // The knowledge list has its own read lifecycle inside loadProjectDetail; the
+  // page must show that lifecycle instead of masquerading a stale or failed read
+  // as an empty list.
+  const [knowledgePhase, setKnowledgePhase] = useState<KnowledgePhase>('idle')
+  const [knowledgeIssue, setKnowledgeIssue] = useState<SurfaceIssue | undefined>()
+  const [projectDetailPhase, setProjectDetailPhase] = useState<DetailPhase>('idle')
+  const [projectDetailIssue, setProjectDetailIssue] = useState<SurfaceIssue | undefined>()
   const [detailProject, setDetailProject] = useState<Project | undefined>()
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | undefined>()
@@ -640,6 +647,10 @@ function PlatformShell({ controller, t, remote, layout, useSessions, useWorkspac
     setSelectedKnowledgeBaseIds(new Set())
     setKnowledgeSearch(undefined)
     setKnowledgePreview(undefined)
+    setKnowledgePhase('idle')
+    setKnowledgeIssue(undefined)
+    setProjectDetailPhase('idle')
+    setProjectDetailIssue(undefined)
   }
 
   const consumeAccount = async (value: TeamSkillAccountResult<TeamSkillAccountState>): Promise<void> => {
@@ -737,6 +748,10 @@ function PlatformShell({ controller, t, remote, layout, useSessions, useWorkspac
   const knowledgeRequest = useRef(0)
   const loadProjectDetail = async (nextProjectId: string, activate: boolean, userId = account?.user.userId): Promise<void> => {
     const requestId = ++projectRequest.current
+    setProjectDetailPhase('loading')
+    setProjectDetailIssue(undefined)
+    setKnowledgePhase('loading')
+    setKnowledgeIssue(undefined)
     if (activate) {
       setProjectId(nextProjectId)
       setProjectAssets(undefined)
@@ -754,6 +769,10 @@ function PlatformShell({ controller, t, remote, layout, useSessions, useWorkspac
       setKnowledgeBases([])
       setSelectedKnowledgeBaseIds(new Set())
       setKnowledgeSearch(undefined)
+      setProjectDetailPhase('failed')
+      setProjectDetailIssue(surfaceIssueFromCode(result.error.code, result.error.message))
+      setKnowledgePhase('failed')
+      setKnowledgeIssue(surfaceIssueFromCode(result.error.code, result.error.message))
       if (result.error.code === 'PROJECT_NOT_MEMBER' || result.error.code === 'RESOURCE_NOT_FOUND') {
         clearStoredProjectId(currentStorageKey(userId))
         await loadAccessSummary(userId)
@@ -766,10 +785,18 @@ function PlatformShell({ controller, t, remote, layout, useSessions, useWorkspac
       if (isSignedOut(value)) {
         resetAccountScope()
         setGate('signed-out')
-      } else showFailure(value)
+      } else {
+        setProjectDetailPhase('failed')
+        setProjectDetailIssue(surfaceIssueFromFailure(value))
+        setKnowledgePhase('failed')
+        setKnowledgeIssue(surfaceIssueFromFailure(value))
+        showFailure(value)
+      }
       return
     }
     setDetailProject(projectModel(value.project))
+    setProjectDetailPhase('ready')
+    setProjectDetailIssue(undefined)
     if (activate) {
       setProjectAssets(value.assets)
       const knowledge = await remote.teamSkills.knowledgeBases(nextProjectId)
@@ -777,6 +804,8 @@ function PlatformShell({ controller, t, remote, layout, useSessions, useWorkspac
       if (!knowledge.ok) {
         setKnowledgeBases([])
         setSelectedKnowledgeBaseIds(new Set())
+        setKnowledgePhase('failed')
+        setKnowledgeIssue(surfaceIssueFromCode(knowledge.error.code, knowledge.error.message))
         showError(knowledge.error.message)
         return
       }
@@ -786,13 +815,19 @@ function PlatformShell({ controller, t, remote, layout, useSessions, useWorkspac
         if (isSignedOut(knowledge.value)) {
           resetAccountScope()
           setGate('signed-out')
-        } else showFailure(knowledge.value)
+          return
+        }
+        setKnowledgePhase('failed')
+        setKnowledgeIssue(surfaceIssueFromFailure(knowledge.value))
+        showFailure(knowledge.value)
         return
       }
       setKnowledgeBases(knowledge.value.filter(item => item.state === 'active' && item.searchable))
       setSelectedKnowledgeBaseIds(new Set())
       setKnowledgeSearch(undefined)
       setKnowledgePreview(undefined)
+      setKnowledgePhase('ready')
+      setKnowledgeIssue(undefined)
       writeStoredProjectId(currentStorageKey(userId), nextProjectId)
     }
   }
@@ -894,6 +929,10 @@ function PlatformShell({ controller, t, remote, layout, useSessions, useWorkspac
       setSelectedKnowledgeBaseIds(new Set())
       setKnowledgeSearch(undefined)
       setKnowledgePreview(undefined)
+      setKnowledgePhase('idle')
+      setKnowledgeIssue(undefined)
+      setProjectDetailPhase('idle')
+      setProjectDetailIssue(undefined)
       clearStoredProjectId(currentStorageKey(account?.user.userId))
       setView(nextView)
       return
@@ -1302,6 +1341,11 @@ function PlatformShell({ controller, t, remote, layout, useSessions, useWorkspac
                 <ProjectsView
                   project={detailProject ?? project}
                   projects={availableProjects}
+                  phase={projectDetailPhase}
+                  issue={projectDetailIssue}
+                  onRetry={() => {
+                    if (projectId !== undefined) void loadProjectDetail(projectId, true)
+                  }}
                   onProjectChange={(projectId) => {
                     void loadProjectDetail(projectId, false)
                   }}
@@ -1341,6 +1385,11 @@ function PlatformShell({ controller, t, remote, layout, useSessions, useWorkspac
                 <KnowledgeView
                   projectId={projectId}
                   knowledgeBases={knowledgeBases}
+                  phase={knowledgePhase}
+                  issue={knowledgeIssue}
+                  onRetry={() => {
+                    if (projectId !== undefined) void loadProjectDetail(projectId, true)
+                  }}
                   selectedIds={selectedKnowledgeBaseIds}
                   boundCount={knowledgeBoundCount}
                   onSelectionChange={setSelectedKnowledgeBaseIds}
@@ -1506,6 +1555,26 @@ type AuthenticatedAccount = Extract<TeamSkillAccountState, { readonly status: 'a
 type HostFailure =
   | { readonly status: 'not-ready'; readonly missing: readonly string[] }
   | { readonly status: 'failed'; readonly code: string; readonly message: string }
+
+/** Read lifecycle of one page-scoped server fetch, rendered by StatePanel. */
+type DetailPhase = 'idle' | 'loading' | 'ready' | 'failed'
+type KnowledgePhase = 'idle' | 'loading' | 'ready' | 'failed'
+
+/** Why a page-scoped read failed; `kind` selects the StatePanel state. */
+interface SurfaceIssue {
+  readonly kind: 'forbidden' | 'service'
+  readonly message: string
+}
+
+/** Surface a failed page-scoped read: permission denials get their own state. */
+function surfaceIssueFromCode(code: string, message: string): SurfaceIssue {
+  return { kind: isForbiddenCode(code) ? 'forbidden' : 'service', message: message.length > 0 ? `${message}（${code}）` : code }
+}
+
+function surfaceIssueFromFailure(value: HostFailure): SurfaceIssue {
+  if (value.status === 'not-ready') return { kind: 'service', message: `服务端未就绪：缺少 ${value.missing.join('、')}` }
+  return surfaceIssueFromCode(value.code, value.message)
+}
 
 // Only permission denials are forbidden; UNAUTHORIZED/TOKEN_* are session
 // failures recovered by reloading the account, not by reading scope help.
@@ -2017,10 +2086,16 @@ function AccountDrawer({
 function ProjectsView({
   project,
   projects,
+  phase,
+  issue,
+  onRetry,
   onProjectChange,
 }: {
   project: Project | undefined
   projects: readonly Project[]
+  phase: DetailPhase
+  issue: SurfaceIssue | undefined
+  onRetry: () => void
   onProjectChange: (id: string) => void
 }) {
   if (project === undefined)
@@ -2062,7 +2137,32 @@ function ProjectsView({
       <div className={css.projectToolbar}>
         <span className={css.toolbarMeta}>{project.organizationName}</span>
       </div>
-      <section className={css.panel}>
+      {phase === 'loading' && (
+        <section className={css.panel}>
+          <StatePanel
+            state="loading"
+            title="正在读取项目详情"
+            reason="项目详情、修订与成员数由服务端按当前账号权限返回，读取完成前本页不显示摘要数值。"
+          />
+        </section>
+      )}
+      {phase === 'failed' && (
+        <section className={css.panel}>
+          <StatePanel
+            state={issue?.kind === 'forbidden' ? 'forbidden' : 'service-error'}
+            title={issue?.kind === 'forbidden' ? '当前账号无权读取该项目详情' : '项目详情暂时不可用'}
+            reason={issue?.message ?? ''}
+            action={
+              <button type="button" className={css.primaryButton} onClick={onRetry}>
+                <IconRefreshOutline16 size={16} />
+                重新加载
+              </button>
+            }
+          />
+        </section>
+      )}
+      {phase === 'ready' && (
+        <section className={css.panel}>
         <div className={css.projectDetailHead}>
           <div className={css.projectIcon}>
             <IconFolderOpenOutline16 size={20} />
@@ -2108,7 +2208,8 @@ function ProjectsView({
           <h2>项目级操作由后台管理</h2>
           <p>插件只提供项目选择和授权资产入口，不提供创建、编辑、成员或资产关联写入。</p>
         </div>
-      </section>
+        </section>
+      )}
     </div>
   )
 }
@@ -2116,6 +2217,9 @@ function ProjectsView({
 function KnowledgeView({
   projectId,
   knowledgeBases,
+  phase,
+  issue,
+  onRetry,
   selectedIds,
   boundCount,
   onSelectionChange,
@@ -2127,6 +2231,9 @@ function KnowledgeView({
 }: {
   projectId: string | undefined
   knowledgeBases: readonly TeamSkillKnowledgeBaseSummary[]
+  phase: KnowledgePhase
+  issue: SurfaceIssue | undefined
+  onRetry: () => void
   selectedIds: Set<string>
   /** 服务端确认的本轮绑定数量；列表选择只是待提交状态。 */
   boundCount: number
@@ -2144,6 +2251,67 @@ function KnowledgeView({
     if (next.has(id)) next.delete(id)
     else next.add(id)
     onSelectionChange(next)
+  }
+  if (phase === 'loading') {
+    return (
+      <div className={css.page}>
+        <PageIntro
+          eyebrow="知识库"
+          title="让规范在对话开始前就到位"
+          description={projectId === undefined ? '请先选择 active 项目。' : '选择只绑定当前 DSH 会话；切换会话或项目会清空本轮选择。'}
+        />
+        <section className={css.panel}>
+          <StatePanel
+            state="loading"
+            title="正在读取知识库"
+            reason="知识库列表由服务端按当前项目与账号权限返回，读取完成前不显示列表，也不显示启用计数。"
+          />
+        </section>
+      </div>
+    )
+  }
+  if (phase === 'failed') {
+    return (
+      <div className={css.page}>
+        <PageIntro
+          eyebrow="知识库"
+          title="让规范在对话开始前就到位"
+          description={projectId === undefined ? '请先选择 active 项目。' : '选择只绑定当前 DSH 会话；切换会话或项目会清空本轮选择。'}
+        />
+        <section className={css.panel}>
+          <StatePanel
+            state={issue?.kind === 'forbidden' ? 'forbidden' : 'service-error'}
+            title={issue?.kind === 'forbidden' ? '当前账号无权读取该项目知识库' : '知识库暂时不可用'}
+            reason={issue?.message ?? ''}
+            impact="读取失败时本页不提供任何候选，也不把列表当作空数据处理。"
+            action={
+              <button type="button" className={css.primaryButton} onClick={onRetry}>
+                <IconRefreshOutline16 size={16} />
+                重新加载
+              </button>
+            }
+          />
+        </section>
+      </div>
+    )
+  }
+  if (phase === 'idle') {
+    return (
+      <div className={css.page}>
+        <PageIntro
+          eyebrow="知识库"
+          title="让规范在对话开始前就到位"
+          description="请先选择 active 项目。"
+        />
+        <section className={css.panel}>
+          <StatePanel
+            state="no-project"
+            title="尚未选择项目"
+            reason="知识库按项目组织；选择项目后才会读取该项目的知识库列表。"
+          />
+        </section>
+      </div>
+    )
   }
   return (
     <div className={css.page}>
@@ -2781,10 +2949,16 @@ function CollectorView({
           采集操作失败：{snapshot.message}
         </div>
       )}
-      {snapshot === undefined && (loading ? <div className={css.panel}>正在读取采集状态…</div> : null)}
+      {snapshot === undefined && (loading ? <div className={css.panel} data-state="loading">正在读取采集状态…</div> : null)}
       {status !== undefined && (
         <>
-          <section className={css.panel} role="region" aria-label="采集状态摘要">
+          <section
+            className={css.panel}
+            role="region"
+            aria-label="采集状态摘要"
+            data-state={loading ? 'loading' : 'ready'}
+            aria-busy={loading}
+          >
             <div className={css.eventList}>
               <div className={css.eventRow}>
                 <span>连接状态</span>
