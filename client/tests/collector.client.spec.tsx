@@ -51,21 +51,30 @@ function remoteWithStatus(status: Record<string, unknown>): ClientRemote {
   } as unknown as ClientRemote
 }
 
+const emptySessions = { ids: [] as string[], current: undefined, byId: {} }
+type EmptySessions = typeof emptySessions
+
 async function openCollector(status: Record<string, unknown>): Promise<void> {
   const controller = new PlatformDemoController()
   controller.open()
   const props = {
     controller,
     t: ((key: string) => key) as never,
-    useSessions: ((selector: (state: { current: undefined }) => unknown) => selector({ current: undefined })) as never,
+    useSessions: ((selector: (state: EmptySessions) => unknown) => selector(emptySessions)) as never,
     useWorkspaces: ((selector: (state: object) => unknown) => selector({})) as never,
     remote: remoteWithStatus(status),
+    layout: {
+      reserveRight: vi.fn(),
+      toggleSidebar: () => {},
+      openDetails: () => {},
+      closeDetails: () => {},
+    },
   } as unknown as PlatformSurfaceProps
   render(<PlatformSurface {...props} />)
   const nav = await screen.findByRole('navigation', { name: '平台模块' })
-  fireEvent.click(within(nav).getByRole('button', { name: '数据采集' }))
+  fireEvent.click(within(nav).getByRole('button', { name: 'AI Coding 可观测' }))
   await waitFor(() => {
-    expect(screen.getByRole('heading', { name: '当前项目的采集管道状态' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'AI Coding 可观测' })).toBeTruthy()
   })
 }
 
@@ -115,13 +124,14 @@ describe('CollectorView pipeline states', () => {
     const props = {
       controller,
       t: ((key: string) => key) as never,
-      useSessions: ((selector: (state: { current: undefined }) => unknown) => selector({ current: undefined })) as never,
+      useSessions: ((selector: (state: EmptySessions) => unknown) => selector(emptySessions)) as never,
       useWorkspaces: ((selector: (state: object) => unknown) => selector({})) as never,
       remote,
+      layout: { reserveRight: vi.fn(), toggleSidebar: () => {}, openDetails: () => {}, closeDetails: () => {} },
     } as unknown as PlatformSurfaceProps
     render(<PlatformSurface {...props} />)
     const nav = await screen.findByRole('navigation', { name: '平台模块' })
-    fireEvent.click(within(nav).getByRole('button', { name: '数据采集' }))
+    fireEvent.click(within(nav).getByRole('button', { name: 'AI Coding 可观测' }))
     expect(await screen.findByText(/采集配置未就绪：缺少 telemetryStorage/)).toBeTruthy()
   })
 })

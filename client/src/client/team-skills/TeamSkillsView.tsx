@@ -59,11 +59,16 @@ export function TeamSkillsView({
   const workspaces = useWorkspaces(state => state.items)
   const [state, setState] = useState<LoadState>({ status: 'loading' })
   const [query, setQuery] = useState('')
+  const [statusFilter, setStatusFilter] = useState<'all' | 'installed' | 'available' | 'quarantined'>('all')
   const [selected, setSelected] = useState<TeamSkillCatalogItem | undefined>()
-  const [view, setView] = useState<'discover' | 'installed'>('discover')
+  const [detail, setDetail] = useState<
+    { readonly item: TeamSkillCatalogItem | undefined; readonly installation: TeamSkillInstallationView | undefined } | undefined
+  >()
+  const [pendingUninstall, setPendingUninstall] = useState<TeamSkillInstallationView | undefined>()
   const [scope, setScope] = useState<Scope>('project')
   const [installing, setInstalling] = useState<string | undefined>()
   const [operationMessage, setOperationMessage] = useState<string | undefined>()
+  const [retryAction, setRetryAction] = useState<(() => void) | undefined>()
   const requestGeneration = useRef(0)
   const activeRequest = useRef<AbortController | undefined>()
 
@@ -114,19 +119,47 @@ export function TeamSkillsView({
     }
   }, [remote, projectId])
 
-  const filtered = useMemo(() => {
+  // One merged list: every catalog row carries its installation state, and
+  // quarantined local rows stay visible with their reason even when the
+  // catalog no longer offers that version.
+  const rows = useMemo(() => {
     if (state.status !== 'ready') return []
     const normalized = query.trim().toLocaleLowerCase()
-    if (!normalized) return state.items
-    return state.items.filter(item =>
-      `${item.displayName}${item.summary}${item.category}${item.tags.join('')}`.toLocaleLowerCase().includes(normalized),
-    )
-  }, [query, state])
-
-  const installedFor = (item: TeamSkillCatalogItem): TeamSkillInstallationView | undefined => {
-    if (state.status !== 'ready') return undefined
-    return state.installations.find(value => value.skillId === item.skillId && value.version === item.version && value.state === 'normal')
-  }
+    const matches = (text: string): boolean => normalized.length === 0 || text.toLocaleLowerCase().includes(normalized)
+    const installationFor = (item: TeamSkillCatalogItem): TeamSkillInstallationView | undefined => {
+      const candidates = state.installations.filter(value => value.skillId === item.skillId && value.state !== 'uninstalled')
+      // 同一 Skill 同时存在项目与全局副本时，行内展示并操作与当前项目作用域一致的那一份。
+      return candidates.find(value => value.scope === 'project') ?? candidates.find(value => value.scope === 'global')
+    }
+    const entries: readonly {
+      readonly key: string
+      readonly item: TeamSkillCatalogItem | undefined
+      readonly installation: TeamSkillInstallationView | undefined
+    }[] = [
+      ...state.items.map(item => ({
+        key: `catalog:${item.skillId}`,
+        item,
+        installation: installationFor(item),
+      })),
+      ...state.installations
+        .filter(value => value.state !== 'uninstalled')
+        .filter(value => !state.items.some(item => item.skillId === value.skillId))
+        .map(value => ({
+          key: `local:${value.localInstallationId}`,
+          item: undefined,
+          installation: value,
+        })),
+    ]
+    return entries.filter((entry) => {
+      const name = entry.item?.displayName ?? entry.installation?.runtimeName ?? ''
+      const summary = entry.item?.summary ?? ''
+      if (!matches(`${name}${summary}${entry.item?.category ?? ''}${(entry.item?.tags ?? []).join('')}`)) return false
+      if (statusFilter === 'all') return true
+      if (statusFilter === 'installed') return entry.installation?.state === 'normal'
+      if (statusFilter === 'quarantined') return entry.installation?.state === 'withdrawn'
+      return entry.installation === undefined
+    })
+  }, [query, statusFilter, state])
 
   const install = async (): Promise<void> => {
     if (selected === undefined || installing !== undefined) return
@@ -148,7 +181,8 @@ export function TeamSkillsView({
     setInstalling(undefined)
     if (!result.ok) {
       if (isAuthorizationFailure(result.error.code)) onAuthorizationFailure?.()
-      setOperationMessage(`安装失败：${result.error.message}`)
+      setOperationMessage(`安装失败：${result.error.message}（${result.error.code}）`)
+      setRetryAction(() => install)
       return
     }
     if (result.value.status === 'not-ready') {
@@ -177,6 +211,7 @@ export function TeamSkillsView({
         : previous,
     )
     setOperationMessage(scope === 'project' ? '已安装到当前项目' : '已安装到全局 DSH')
+    setRetryAction(undefined)
     setSelected(undefined)
   }
 
@@ -190,7 +225,8 @@ export function TeamSkillsView({
     setInstalling(undefined)
     if (!result.ok) {
       if (isAuthorizationFailure(result.error.code)) onAuthorizationFailure?.()
-      setOperationMessage(`卸载失败：${result.error.message}`)
+      setOperationMessage(`卸载失败：${result.error.message}（${result.error.code}）`)
+      setRetryAction(() => () => void uninstall(installation))
       return
     }
     if (result.value.status === 'failed') {
@@ -213,6 +249,7 @@ export function TeamSkillsView({
         : previous,
     )
     setOperationMessage('已从 DSH 移除该 Skill')
+    setRetryAction(undefined)
   }
 
   if (state.status === 'loading')
@@ -253,7 +290,7 @@ export function TeamSkillsView({
         <h2>{state.title}</h2>
         <p>{state.message}</p>
         <button type="button" className={css.secondaryButton} onClick={() => void load()}>
-          <IconRefreshOutline16 size={15} />
+          <IconRefreshOutline16 size={16} />
           重新读取
         </button>
       </section>
@@ -265,9 +302,10 @@ export function TeamSkillsView({
         <div>
           <span className={css.eyebrow}>团队 Skill</span>
           <h1>把已发布能力安装到本地 DSH</h1>
-          <p>目录由服务端按权限返回，安装由 Host 校验制品并写入 DSH 原生目录。</p>
+          <p>目录、安装与授权状态合并为可用 Skill 视图；发布、审核与绑定在后台治理完成。</p>
         </div>
         <div className={css.actions}>
+          <span className={css.scopeLabel}>项目作用域：{projectId === undefined ? '未选择' : (projects.find(item => item.projectId === projectId)?.name ?? projectId)}</span>
           <label className={css.search}>
             <span className={css.searchIcon}>⌕</span>
             <input
@@ -278,140 +316,255 @@ export function TeamSkillsView({
               placeholder="搜索 Skill"
             />
           </label>
+          <label className={css.statusFilter}>
+            <span className={css.statusFilterLabel}>状态</span>
+            <select
+              aria-label="Skill 状态筛选"
+              value={statusFilter}
+              onChange={(event) => {
+                setStatusFilter(event.target.value as typeof statusFilter)
+              }}
+            >
+              <option value="all">全部</option>
+              <option value="available">未安装</option>
+              <option value="installed">已安装</option>
+              <option value="quarantined">已隔离</option>
+            </select>
+          </label>
           <button type="button" className={css.secondaryButton} onClick={() => void load()} title="刷新目录">
-            <IconRefreshOutline16 size={15} />
+            <IconRefreshOutline16 size={16} />
             刷新
           </button>
         </div>
       </div>
       {operationMessage !== undefined && (
         <div className={css.operation} role="status">
-          <IconCheckOutline14 size={15} />
-          {operationMessage}
+          <IconCheckOutline14 size={16} />
+          <span>{operationMessage}</span>
+          {retryAction !== undefined && (
+            <button
+              type="button"
+              className={css.secondaryButton}
+              onClick={() => {
+                setOperationMessage(undefined)
+                retryAction()
+              }}
+            >
+              重试
+            </button>
+          )}
         </div>
       )}
-      <div className={css.tabs} role="tablist" aria-label="团队 Skill 视图">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={view === 'discover'}
-          className={view === 'discover' ? css.tabActive : css.tab}
-          onClick={() => {
-            setView('discover')
-          }}
-        >
-          发现
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={view === 'installed'}
-          className={view === 'installed' ? css.tabActive : css.tab}
-          onClick={() => {
-            setView('installed')
-          }}
-        >
-          已安装 ({state.installations.filter(item => item.state === 'normal').length})
-        </button>
-      </div>
-      {view === 'discover' &&
-        (filtered.length === 0 ? (
-          <div className={css.empty}>
-            <IconSkillOutline16 size={21} />
-            <h2>没有匹配的已发布 Skill</h2>
-            <p>请调整搜索词，或等待管理员发布新的平台制品。</p>
-          </div>
-        ) : (
-          <div className={css.grid}>
-            {filtered.map((item) => {
-              const installation = installedFor(item)
-              return (
-                <article key={item.skillId} className={css.card}>
-                  <div className={css.cardTop}>
-                    <span className={css.skillIcon}>
-                      <IconSkillOutline16 size={17} />
-                    </span>
-                    <span className={css.published}>已发布</span>
-                  </div>
-                  <h2>{item.displayName}</h2>
-                  <p>{item.summary}</p>
-                  <div className={css.meta}>
-                    <span>{item.category}</span>
-                    <span>平台托管版本 v{item.version}</span>
-                  </div>
-                  <div className={css.tags}>
-                    {item.tags.map(tag => (
-                      <span key={tag}>{tag}</span>
-                    ))}
-                  </div>
-                  <div className={css.cardBottom}>
-                    {installation !== undefined ? (
-                      <span className={css.installed}>
-                        <IconCheckOutline14 size={14} />
-                        {installation.scope === 'project' ? '当前项目已安装' : '全局已安装'}
-                      </span>
-                    ) : (
-                      <button
-                        type="button"
-                        className={css.installButton}
-                        onClick={() => {
-                          setSelected(item)
-                          setScope(workspaces[0] === undefined ? 'global' : 'project')
-                        }}
-                      >
-                        <IconPlusOutline16 size={15} />
-                        安装 Skill
-                      </button>
-                    )}
-                  </div>
-                </article>
-              )
-            })}
-          </div>
-        ))}
-      {view === 'installed' && (
+      {rows.length === 0 ? (
+        <div className={css.empty}>
+          <IconSkillOutline16 size={20} />
+          <h2>没有匹配的已发布 Skill</h2>
+          <p>请调整搜索词或状态筛选，或等待管理员发布新的平台制品。</p>
+        </div>
+      ) : (
         <div className={css.grid}>
-          {state.installations
-            .filter(item => item.state !== 'uninstalled')
-            .map((item) => {
-              const catalogItem = state.items.find(value => value.skillId === item.skillId)
-              return (
-                <article key={item.localInstallationId} className={css.card}>
-                  <div className={css.cardTop}>
-                    <span className={css.skillIcon}>
-                      <IconSkillOutline16 size={17} />
+          {rows.map(({ key, item, installation }) => {
+            const displayName = item?.displayName ?? installation?.runtimeName ?? ''
+            const version = item?.version ?? installation?.version ?? ''
+            const withdrawn = installation?.state === 'withdrawn'
+            const outdated = item !== undefined && installation !== undefined && installation.version !== item.version
+            return (
+              <article key={key} className={css.card}>
+                <div className={css.cardTop}>
+                  <span className={css.skillIcon}>
+                    <IconSkillOutline16 size={18} />
+                  </span>
+                  <span className={withdrawn ? css.withdrawn : installation !== undefined ? css.installed : css.published}>
+                    {withdrawn ? '已隔离' : installation !== undefined ? '已安装' : '已发布'}
+                  </span>
+                </div>
+                <h2>{displayName}</h2>
+                <p>{item?.summary ?? '本地已安装的 Team Skill'}</p>
+                <div className={css.meta}>
+                  <span>{item?.category ?? (installation?.scope === 'project' ? '当前项目' : '全局 DSH')}</span>
+                  <span>平台托管版本 v{version}</span>
+                  {outdated && <span>本地 v{installation.version}，可更新</span>}
+
+                </div>
+                <div className={css.tags}>
+                  {(item?.tags ?? []).map(tag => (
+                    <span key={tag}>{tag}</span>
+                  ))}
+                  {withdrawn && <span>不可用原因：版本已下线，内容保留在隔离区</span>}
+                </div>
+                <div className={css.cardBottom}>
+                  <button
+                    type="button"
+                    className={css.secondaryButton}
+                    aria-label={`查看${displayName}`}
+                    onClick={() => {
+                      setDetail({ item: item as TeamSkillCatalogItem, installation })
+                    }}
+                  >
+                    查看
+                  </button>
+                  {withdrawn ? null : installation === undefined ? (
+                    <button
+                      type="button"
+                      className={css.installButton}
+                      onClick={() => {
+                        setSelected(item)
+                        setScope(workspaces[0] === undefined ? 'global' : 'project')
+                      }}
+                    >
+                      <IconPlusOutline16 size={16} />
+                      安装 Skill
+                    </button>
+                  ) : outdated ? (
+                    <button
+                      type="button"
+                      className={css.installButton}
+                      disabled={installing !== undefined}
+                      onClick={() => {
+                        setSelected(item)
+                        setScope(installation.scope === 'global' ? 'global' : 'project')
+                      }}
+                    >
+                      <IconPlusOutline16 size={16} />
+                      更新
+                    </button>
+                  ) : (
+                    <span className={css.installed}>
+                      <IconCheckOutline14 size={16} />
+                      {installation.scope === 'project' ? '当前项目已安装' : '全局已安装'}
                     </span>
-                    <span className={item.state === 'withdrawn' ? css.withdrawn : css.published}>
-                      {item.state === 'withdrawn' ? '已隔离' : '已安装'}
-                    </span>
-                  </div>
-                  <h2>{catalogItem?.displayName ?? item.runtimeName}</h2>
-                  <p>{catalogItem?.summary ?? '本地已安装的 Team Skill'}</p>
-                  <div className={css.meta}>
-                    <span>{item.scope === 'project' ? '当前项目' : '全局 DSH'}</span>
-                    <span>v{item.version}</span>
-                  </div>
-                  <div className={css.tags}>
-                    <span>SHA-256 {item.artifactSha256.slice(0, 12)}...</span>
-                  </div>
-                  <div className={css.cardBottom}>
-                    {item.state === 'withdrawn' ? (
-                      <span className={css.withdrawnText}>版本已下线，内容保留在隔离区</span>
-                    ) : (
-                      <button
-                        type="button"
-                        className={css.secondaryButton}
-                        disabled={installing !== undefined}
-                        onClick={() => void uninstall(item)}
-                      >
-                        <IconCloseOutline16 size={14} />
-                        卸载
-                      </button>
-                    )}
-                  </div>
-                </article>
-              )
-            })}
+                  )}
+                  {installation?.state === 'normal' && (
+                    <button
+                      type="button"
+                      className={css.secondaryButton}
+                      disabled={installing !== undefined}
+                      onClick={() => {
+                        setPendingUninstall(installation)
+                      }}
+                    >
+                      <IconCloseOutline16 size={16} />
+                      卸载
+                    </button>
+                  )}
+                </div>
+              </article>
+            )
+          })}
+        </div>
+      )}
+
+      {detail !== undefined && (
+        <div className={css.backdrop} role="presentation">
+          <div
+            className={css.modal}
+            role="dialog"
+            aria-modal="true"
+            aria-label={`查看${detail.item?.displayName ?? detail.installation?.runtimeName ?? ''}`}
+          >
+            <div className={css.modalHeader}>
+              <div>
+                <span className={css.eyebrow}>Skill 详情</span>
+                <h2>{detail.item?.displayName ?? detail.installation?.runtimeName}</h2>
+              </div>
+              <button
+                type="button"
+                className={css.close}
+                aria-label="关闭详情"
+                onClick={() => {
+                  setDetail(undefined)
+                }}
+              >
+                <IconCloseOutline16 size={16} />
+              </button>
+            </div>
+            <dl className={css.detailFacts}>
+              <div>
+                <dt>版本</dt>
+                <dd>
+                  {detail.item === undefined
+                    ? `v${detail.installation?.version}`
+                    : `目录 v${detail.item.version}${detail.installation === undefined ? '' : ` · 本地 v${detail.installation.version}`}`}
+                </dd>
+              </div>
+              <div>
+                <dt>来源</dt>
+                <dd>平台托管制品</dd>
+              </div>
+              <div>
+                <dt>作用域</dt>
+                <dd>{detail.installation === undefined ? '未安装（可选当前项目或全局）' : detail.installation.scope === 'project' ? '当前项目' : '全局 DSH'}</dd>
+              </div>
+              <div>
+                <dt>状态</dt>
+                <dd>{detail.installation === undefined ? '已发布' : detail.installation.state === 'withdrawn' ? '已隔离' : '已安装'}</dd>
+              </div>
+              <div>
+                <dt>不可用原因</dt>
+                <dd>{detail.installation?.state === 'withdrawn' ? '版本已下线，内容保留在隔离区' : '无'}</dd>
+              </div>
+            </dl>
+            <div className={css.modalFooter}>
+              <button
+                type="button"
+                className={css.secondaryButton}
+                onClick={() => {
+                  setDetail(undefined)
+                }}
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pendingUninstall !== undefined && (
+        <div className={css.backdrop} role="presentation">
+          <div className={css.modal} role="dialog" aria-modal="true" aria-label={`卸载${pendingUninstall.runtimeName}`}>
+            <div className={css.modalHeader}>
+              <div>
+                <span className={css.eyebrow}>卸载确认</span>
+                <h2>{pendingUninstall.runtimeName}</h2>
+              </div>
+              <button
+                type="button"
+                className={css.close}
+                aria-label="关闭卸载确认"
+                onClick={() => {
+                  setPendingUninstall(undefined)
+                }}
+              >
+                <IconCloseOutline16 size={16} />
+              </button>
+            </div>
+            <p className={css.modalLead}>
+              将从 {pendingUninstall.scope === 'project' ? '当前项目' : '全局 DSH'} 移除 v{pendingUninstall.version} 的本地副本；该 Skill 在此作用域内随即不可用。
+            </p>
+            <div className={css.modalFooter}>
+              <button
+                type="button"
+                className={css.secondaryButton}
+                onClick={() => {
+                  setPendingUninstall(undefined)
+                }}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className={css.primaryButton}
+                disabled={installing !== undefined}
+                onClick={() => {
+                  const target = pendingUninstall
+                  setPendingUninstall(undefined)
+                  void uninstall(target)
+                }}
+              >
+                确认卸载
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

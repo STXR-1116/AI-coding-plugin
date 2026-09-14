@@ -706,3 +706,5 @@ export interface TelemetryBatchRequest {
 
 /** Collector control results merge the reporter state with queue totals. */
 export type CollectorSnapshot = CollectorResult<CollectorStatus>
+
+export * from './workspace-types.ts'

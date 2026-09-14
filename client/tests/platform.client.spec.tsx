@@ -176,7 +176,11 @@ const demoWorkspaceState: WorkspaceListState = {
   recentWorkspaceId: 'ws-1' as WorkspaceId,
 }
 
-const demoSessionState = { current: 'session-1', byId: { 'session-1': { blank: false } } }
+const demoSessionState = {
+  ids: ['session-1'],
+  current: 'session-1',
+  byId: { 'session-1': { blank: false, displayTitle: 'session-1' } },
+}
 
 const demoCollectorStatus = {
   mode: 'active' as const,
@@ -276,6 +280,44 @@ function demoRemote(): ClientRemote {
         },
       })),
     },
+    cloudWorkspaces: {
+      agentProfiles: vi.fn(async () => ({
+        ok: true as const,
+        value: {
+          status: 'ready' as const,
+          fixtureOnly: true,
+          value: [{
+            agentProfileId: 'ap-code-default',
+            agentProfileVersionId: 'apv-1',
+            name: '默认研发代理',
+            description: '面向研发工作空间的默认执行配置',
+            versionLabel: 'v1',
+            changeSummary: '首个发布版本',
+            agentTypeId: 'at-claude-code',
+            agentTypeName: 'Claude Code',
+            agentTypeKey: 'claude_code',
+            agentTypeReadiness: 'ready',
+            agentTypeCapabilities: ['terminal'],
+            model: 'deepseek-v3.2',
+            reasoning: 'medium',
+            skills: [],
+            knowledgeBases: [],
+            memory: null,
+            executionPolicy: { permission_mode: 'approval', write_mode: 'write' },
+            typeExtension: {},
+            typeExtensionOpaqueKeys: [],
+            readiness: 'ready',
+            unavailableReason: null,
+            default: true,
+            status: 'published' as const,
+            createdBy: '平台管理员',
+            publishedAt: '2026-09-01T00:00:00.000Z',
+            updatedAt: '2026-09-02T00:00:00.000Z',
+          }],
+        },
+      })),
+      agentProfileVersion: vi.fn(async () => ({ ok: true as const, value: { status: 'signed-out' as const } })),
+    },
   } as unknown as ClientRemote
 }
 
@@ -292,7 +334,8 @@ function mountSurface(controller = new PlatformDemoController(), remote = demoRe
     useSessions: (<S,>(selector: (state: typeof demoSessionState) => S): S => selector(demoSessionState)) as never,
     useWorkspaces: (<S,>(selector: (state: WorkspaceListState) => S): S => selector(demoWorkspaceState)) as never,
     remote,
-  } as PlatformSurfaceProps
+    layout: { reserveRight: vi.fn(), toggleSidebar: () => {}, openDetails: () => {}, closeDetails: () => {} },
+  } as unknown as PlatformSurfaceProps
   return { controller, ...render(<PlatformSurface {...props} />) }
 }
 
@@ -425,10 +468,11 @@ describe('AI Coding platform demo', () => {
     const props = {
       controller,
       t,
-      useSessions: (() => ({ current: undefined, byId: {} })) as never,
+      layout: { reserveRight: vi.fn(), toggleSidebar: () => {}, openDetails: () => {}, closeDetails: () => {} },
+      useSessions: (() => ({ ids: [], current: undefined, byId: {} })) as never,
       useWorkspaces: (<S,>(selector: (state: WorkspaceListState) => S): S => selector(demoWorkspaceState)) as never,
       remote: signedOutRemote(),
-    } as PlatformSurfaceProps
+    } as unknown as PlatformSurfaceProps
     render(<PlatformSurface {...props} />)
 
     expect(await screen.findByRole('heading', { name: '登录你的编程协作台' })).toBeTruthy()
@@ -450,10 +494,11 @@ describe('AI Coding platform demo', () => {
         {...({
           controller,
           t,
-          useSessions: (() => ({ current: undefined, byId: {} })) as never,
+          layout: { reserveRight: vi.fn(), toggleSidebar: () => {}, openDetails: () => {}, closeDetails: () => {} },
+          useSessions: (() => ({ ids: [], current: undefined, byId: {} })) as never,
           useWorkspaces: (<S,>(selector: (state: WorkspaceListState) => S): S => selector(demoWorkspaceState)) as never,
           remote: signedOutRemote(),
-        } as PlatformSurfaceProps)}
+        } as unknown as PlatformSurfaceProps)}
       />,
     )
 
@@ -471,8 +516,47 @@ describe('AI Coding platform demo', () => {
     controller.open()
     mountSurface(controller, remote)
 
-    expect(await screen.findByRole('heading', { name: '账号服务暂不可用' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '服务暂时不可用' })).toBeTruthy()
     expect(screen.getByText('项目访问接口未装配')).toBeTruthy()
+  })
+
+  it('reserves the frame right edge while the workbench is docked and clears it on close', async () => {
+    // jsdom lacks ResizeObserver; real browsers fire once on observe — mirror that.
+    class ResizeObserverStub {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(): void {
+        this.callback([], this)
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    vi.stubGlobal('ResizeObserver', ResizeObserverStub)
+    try {
+      const layout = { reserveRight: vi.fn(), toggleSidebar: vi.fn(), openDetails: vi.fn(), closeDetails: vi.fn() }
+      const controller = new PlatformDemoController()
+      controller.open()
+      const props = {
+        controller,
+        t,
+        useSessions: (<S,>(selector: (state: typeof demoSessionState) => S): S => selector(demoSessionState)) as never,
+        useWorkspaces: (<S,>(selector: (state: WorkspaceListState) => S): S => selector(demoWorkspaceState)) as never,
+        remote: demoRemote(),
+        layout,
+      } as unknown as PlatformSurfaceProps
+      const view = render(<PlatformSurface {...props} />)
+      // Overview is the full-screen modal: the effect only clears any stale
+      // reservation while not docked.
+      expect(layout.reserveRight).toHaveBeenCalledWith(0)
+      const clearsAfterOverview = layout.reserveRight.mock.calls.length
+      fireEvent.click(await screen.findByRole('button', { name: '云工作空间' }))
+      // Docked: the rendered surface width is reserved (0 in jsdom), and the
+      // cleanup clears the reservation.
+      expect(layout.reserveRight.mock.calls.length).toBeGreaterThan(clearsAfterOverview)
+      view.unmount()
+      expect(layout.reserveRight).toHaveBeenLastCalledWith(0)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('opens from the sidebar entry and closes from the overlay', () => {
@@ -484,7 +568,8 @@ describe('AI Coding platform demo', () => {
       wide: true,
       onOpen,
       t,
-      useSessions: (() => ({ current: undefined, byId: {} })) as never,
+      layout: { reserveRight: vi.fn(), toggleSidebar: () => {}, openDetails: () => {}, closeDetails: () => {} },
+      useSessions: (() => ({ ids: [], current: undefined, byId: {} })) as never,
       useWorkspaces: (() => ({})) as never,
     } as Parameters<typeof PlatformEntry>[0]
     const entry = render(<PlatformEntry {...entryProps} />)
@@ -526,17 +611,17 @@ describe('AI Coding platform demo', () => {
     fireEvent.click(within(nav).getByRole('button', { name: '记忆库' }))
     expect((await screen.findAllByText('服务端记忆：稳定错误码必须保留。')).length).toBeGreaterThan(0)
 
-    fireEvent.click(within(nav).getByRole('button', { name: '数据采集' }))
+    fireEvent.click(within(nav).getByRole('button', { name: 'AI Coding 可观测' }))
     expect((await screen.findAllByText('采集中')).length).toBeGreaterThan(0)
     fireEvent.click(screen.getByRole('button', { name: '暂停采集' }))
     expect((await screen.findAllByText('已暂停')).length).toBeGreaterThan(0)
 
     fireEvent.click(within(nav).getByRole('button', { name: 'Agent 配置' }))
-    expect(screen.getByRole('heading', { name: '管理云平台里的 Coding Agent' })).toBeTruthy()
-    expect(screen.getAllByText('DeepSeek-V3').length).toBeGreaterThan(0)
-    fireEvent.click(screen.getByRole('button', { name: /交付工程 Agent/ }))
-    expect(screen.getByText('DeepSeek-Coder-V2')).toBeTruthy()
-    expect(screen.getByText('128k')).toBeTruthy()
+    // The page reads the project's published versions through the Host Remote.
+    expect(await screen.findByText('默认研发代理')).toBeTruthy()
+    expect(screen.getAllByText('fixture-only').length).toBeGreaterThan(0)
+    expect(screen.queryByRole('button', { name: '保存配置' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '发布' })).toBeNull()
 
     expect(screen.queryByRole('button', { name: '工作台' })).toBeNull()
 
@@ -648,28 +733,19 @@ describe('AI Coding platform demo', () => {
     expect(await screen.findByRole('heading', { name: '从权限范围内的资产开始协作' })).toBeTruthy()
   })
 
-  it('keeps the selected project while a detail refresh fails', async () => {
-    const remote = demoRemote()
-    remote.teamSkills.project = vi
-      .fn()
-      .mockResolvedValueOnce({ ok: true as const, value: demoProjectDetail })
-      .mockResolvedValueOnce({ ok: false as const, error: { code: 'NETWORK_ERROR', message: '服务暂时不可用', details: {} } })
+  it('keeps the selected project while browsing project details without a second selector', async () => {
     const controller = new PlatformDemoController()
     controller.open()
-    mountSurface(controller, remote)
+    mountSurface(controller)
     expect(await screen.findByRole('heading', { name: '从权限范围内的资产开始协作' })).toBeTruthy()
     fireEvent.change(screen.getByLabelText('当前项目'), { target: { value: 'orbit-ui' } })
     await waitFor(() => {
       expect(screen.getByLabelText('当前项目')).toHaveProperty('value', 'orbit-ui')
     })
     fireEvent.click(screen.getByRole('button', { name: '项目' }))
-    const projectSelect = screen.getByRole('combobox', { name: '查看项目' })
-    fireEvent.change(projectSelect, { target: { value: 'orbit-ui' } })
-    await waitFor(() => {
-      expect(screen.getByLabelText('当前项目')).toHaveProperty('value', 'orbit-ui')
-    })
-    expect(screen.queryByText('代码评审')).toBeNull()
-    expect(screen.getByText('服务暂时不可用')).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'AI开放平台', level: 1 })).toBeTruthy()
+    expect(screen.queryByRole('combobox', { name: '查看项目' })).toBeNull()
+    expect(screen.getByLabelText('当前项目')).toHaveProperty('value', 'orbit-ui')
   })
 })
 
@@ -685,7 +761,7 @@ it('loads project memories from the service and updates them with the server rev
   })
   fireEvent.click(within(screen.getByRole('navigation', { name: '平台模块' })).getByRole('button', { name: '记忆库' }))
   expect((await screen.findAllByText('服务端记忆：稳定错误码必须保留。')).length).toBeGreaterThan(0)
-  fireEvent.click(screen.getByRole('button', { name: /服务端记忆：稳定错误码必须保留。/ }))
+  fireEvent.click(screen.getByRole('button', { name: '查看记忆 m-1' }))
   fireEvent.click(screen.getByRole('button', { name: '编辑记忆' }))
   const editor = screen.getByRole('textbox', { name: '记忆正文' })
   fireEvent.change(editor, { target: { value: '服务端记忆已更新。' } })
@@ -734,8 +810,8 @@ it('does not let an older memory detail response replace the selected record', a
   })
   fireEvent.click(within(screen.getByRole('navigation', { name: '平台模块' })).getByRole('button', { name: '记忆库' }))
   expect((await screen.findAllByText(firstMemory.content)).length).toBeGreaterThan(0)
-  fireEvent.click(screen.getByRole('button', { name: new RegExp(firstMemory.content) }))
-  fireEvent.click(screen.getByRole('button', { name: new RegExp(secondMemory.content) }))
+  fireEvent.click(screen.getByRole('button', { name: `查看记忆 ${firstMemory.memoryId}` }))
+  fireEvent.click(screen.getByRole('button', { name: `查看记忆 ${secondMemory.memoryId}` }))
   releaseFirst?.()
   await waitFor(() => {
     expect(screen.getAllByText(secondMemory.content).length).toBeGreaterThan(0)

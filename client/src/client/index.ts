@@ -1,8 +1,8 @@
 /** Browser entry for the single first-party AI Coding platform demo. */
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
+import type { ILayout } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { en, NS, zh, type PlatformKey } from './locales.ts'
 import { PlatformDemoController } from './controller.ts'
@@ -21,7 +21,7 @@ export type { PlatformSurfaceProps } from './PlatformSurface.tsx'
 export { PlatformDemoController } from './controller.ts'
 
 /** Services required for the locale and the two DSH extension slots. */
-export const inject = ['locale', 'slots', 'remote', 'remote.teamSkills']
+export const inject = ['locale', 'slots', 'remote', 'remote.teamSkills', 'remote.cloudWorkspaces', 'sessions', 'workspaces', 'layout']
 
 /** Register the sidebar entry and frame overlay owned by this plugin. */
 export function apply(ctx: ClientContext): void {
@@ -43,9 +43,18 @@ export function apply(ctx: ClientContext): void {
     id: 'ai-coding-platform-surface',
     order: 30,
     locale: NS,
-    inject: (): { controller: PlatformDemoController; remote: typeof ctx.remote } => ({
+    inject: (): {
+      controller: PlatformDemoController
+      remote: typeof ctx.remote
+      layout: ILayout
+      openSession: (sessionId: SessionId) => void
+      startSession: () => void
+    } => ({
       controller,
       remote: ctx.remote,
+      layout: ctx.layout,
+      openSession: (sessionId) => { ctx.sessions.open(sessionId) },
+      startSession: () => { ctx.workspaces.startSession() },
     }),
   }, PlatformSurface))
 }

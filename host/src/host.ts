@@ -40,7 +40,8 @@ import type {
   TeamSkillMemoryAudit,
 } from './types.ts'
 
-const ACCOUNT_CREDENTIAL_KEY = credentialKey('dsh-ai-coding-platform', 'account')
+/** Credential record shared by the Team Skill Host and the cloud workspace session provider. */
+export const ACCOUNT_CREDENTIAL_KEY = credentialKey('dsh-ai-coding-platform', 'account')
 
 /**
  * Local queue partition name for static-token deployments: only used while no

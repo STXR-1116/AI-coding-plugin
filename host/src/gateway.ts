@@ -47,6 +47,12 @@ import { TelemetryReporter } from './telemetry/reporter.ts'
 import { resolveTelemetrySettings } from './telemetry/settings.ts'
 import type { CollectorResult, TelemetryQueueSettings } from './types.ts'
 
+/** Bounded window for confirming that the runtime catalog reflects a just-written copy. */
+const SKILL_DISCOVERY_CONFIRM_TIMEOUT_MS = 5_000
+
+/** Poll interval inside the discovery confirmation window. */
+const SKILL_DISCOVERY_CONFIRM_INTERVAL_MS = 100
+
 /** Deployment-owned collector queue settings for the AI Coding profile. */
 export interface TelemetryCollectorConfig {
   readonly maxEvents?: number
@@ -123,10 +129,23 @@ export class TeamSkillGateway extends TypertRemoteService {
       globalSkillRoot: config.globalSkillRoot,
       ...(credentials === undefined ? {} : { credentials }),
       resolveWorkspace: workspaceId => ctx.workspaceRegistry.get(WorkspaceId(workspaceId))?.path,
-      refreshSkillCatalog: async (_scope, workspacePath, runtimeName, expectedPresent = true) =>
-        (await ctx.skills.list(...(workspacePath === undefined ? [] : [{ cwd: workspacePath }]))).some(
-          skill => skill.name === runtimeName,
-        ) === expectedPresent,
+      // Confirming discovery is a handshake with an asynchronously updated
+      // on-disk catalog: the provider reads the installation root and the
+      // registry caches its collected catalog by revision, so the first read
+      // after the Host writes a copy can still miss it. Poll within a bounded
+      // window instead of reading once; a root that never reports the expected
+      // presence still fails.
+      refreshSkillCatalog: async (_scope, workspacePath, runtimeName, expectedPresent = true) => {
+        const deadline = Date.now() + SKILL_DISCOVERY_CONFIRM_TIMEOUT_MS
+        for (;;) {
+          const names = (
+            await ctx.skills.list(...(workspacePath === undefined ? [] : [{ cwd: workspacePath }]))
+          ).map(skill => skill.name)
+          if (names.includes(runtimeName) === expectedPresent) return true
+          if (Date.now() >= deadline) return false
+          await new Promise(resolve => setTimeout(resolve, SKILL_DISCOVERY_CONFIRM_INTERVAL_MS))
+        }
+      },
     })
     this.collectorSettings = resolveTelemetrySettings(config.telemetry)
     this.collectorStaticPartition = config.accessToken !== undefined && config.accessToken.length > 0 ? STATIC_TOKEN_PARTITION : undefined

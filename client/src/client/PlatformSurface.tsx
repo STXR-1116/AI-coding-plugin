@@ -1,12 +1,17 @@
 /** Full-screen, browser-local demo surface for the first-party platform. */
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentType, type ReactNode } from 'react'
-import type { ClientRemote, TeamSkillAccessSummary, TeamSkillAccountResult, TeamSkillAccountState, TeamSkillAsset, TeamSkillChangePasswordRequest, TeamSkillEnvironment, TeamSkillLoginRequest, TeamSkillOrganization, TeamSkillProject, TeamSkillProjectAsset, TeamSkillKnowledgeBaseSummary, TeamSkillKnowledgeSearchResponse, TeamSkillKnowledgePreview, TeamSkillMemory, TeamSkillMemoryPage, TeamSkillMemoryMutation } from '@deepseek-ai/dsh-api-remotes/client'
+import type { ClientRemote, TeamSkillAccessSummary, TeamSkillAccountResult, TeamSkillAccountRole, TeamSkillAccountState, TeamSkillAsset, TeamSkillChangePasswordRequest, TeamSkillEnvironment, TeamSkillLoginRequest, TeamSkillOrganization, TeamSkillProject, TeamSkillProjectAsset, TeamSkillKnowledgeBaseSummary, TeamSkillKnowledgeSearchResponse, TeamSkillKnowledgePreview, TeamSkillMemory, TeamSkillMemoryPage, TeamSkillMemoryMutation } from '@deepseek-ai/dsh-api-remotes/client'
 import type { CollectorSnapshot, CollectorStatus } from '@deepseek-ai/dsh-ai-coding-platform/types'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { IconArchiveOutline20, IconAgentPresetOutline16, IconCloseOutline16, IconDataOutline16, IconFolderOpenOutline16, IconGoalOutline16, IconInspectOutline12, IconPauseOutline16, IconPlayOutline16, IconQueueOutline14, IconRefreshOutline16, IconSearchOutline16, IconSettingsOutline14, IconSkillOutline16, IconSparkle16, IconUserOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ILayout } from '@deepseek-ai/dsh-client-ui-layout/client'
+import { IconArchiveOutline20, IconAgentPresetOutline16, IconChevronLeftOutline14, IconChevronRightOutline14, IconCloseOutline16, IconDataOutline16, IconFolderOpenOutline16, IconGoalOutline16, IconInspectOutline12, IconPauseOutline16, IconPlayOutline16, IconQueueOutline14, IconRefreshOutline16, IconSearchOutline16, IconSettingsOutline14, IconSkillOutline16, IconSparkle16, IconUserOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { DEFAULT_APPEARANCE, loadAppearance, resolveTheme, saveAppearance, type Appearance } from './appearance.ts'
 import { NS } from './locales.ts'
 import type { PlatformDemoController } from './controller.ts'
 import { TeamSkillsView } from './team-skills/TeamSkillsView.tsx'
+import { CloudWorkspacesView } from './cloud-workspaces/CloudWorkspacesView'
+import { AgentConfigView } from './agent-config/AgentConfigView'
 import css from './PlatformSurface.module.css'
 
 /** Full props for the root-scoped overlay slot. */
@@ -14,9 +19,15 @@ export type PlatformSurfaceProps = PropsRuntime<'shell.overlay'> &
   PropsLocale<typeof NS> & {
     controller: PlatformDemoController
     remote: ClientRemote
+    /** Frame layout face: the docked workbench reserves its own width. */
+    layout: ILayout
+    /** Select the current native session (the workbench switcher). */
+    openSession: (sessionId: SessionId) => void
+    /** The native New Session flow (creates/reuses a blank session). */
+    startSession: () => void
   }
 
-type ViewId = 'overview' | 'projects' | 'skills' | 'knowledge' | 'memory' | 'collector' | 'agent-config'
+type ViewId = 'overview' | 'projects' | 'skills' | 'cloud-workspaces' | 'knowledge' | 'memory' | 'collector' | 'agent-config'
 type IconComponent = ComponentType<{ size?: number; className?: string }>
 
 interface NavItem {
@@ -24,6 +35,12 @@ interface NavItem {
   label: string
   hint: string
   icon: IconComponent
+}
+
+interface NavGroup {
+  id: string
+  label: string
+  items: readonly NavItem[]
 }
 
 interface Project {
@@ -41,114 +58,46 @@ interface Project {
   revision: number
 }
 
-interface AgentConfig {
-  id: string
-  name: string
-  description: string
-  status: '运行中' | '已暂停'
-  model: string
-  reasoning: string
-  accessMode: string
-  skills: readonly string[]
-  autoContext: boolean
-  concurrency: number
-  tokenBudget: string
-  timeout: string
-  updated: string
+const OVERVIEW_NAV_ITEM: NavItem = {
+  id: 'overview',
+  label: '总览',
+  hint: '当前项目摘要',
+  icon: IconSparkle16,
 }
 
-const NAV_ITEMS: readonly NavItem[] = [
+// Task-grouped navigation: prepare assets, work in the workspace, review
+// telemetry. The account group is the rail-bottom drawer trigger.
+const NAV_GROUPS: readonly NavGroup[] = [
   {
-    id: 'overview',
-    label: '总览',
-    hint: '项目与执行概况',
-    icon: IconSparkle16,
+    id: 'prepare',
+    label: '准备',
+    items: [
+      { id: 'projects', label: '项目', hint: '权限范围内的项目', icon: IconFolderOpenOutline16 },
+      { id: 'skills', label: '团队 Skill', hint: '团队能力目录', icon: IconSkillOutline16 },
+      { id: 'knowledge', label: '知识库', hint: '项目资料与规范', icon: IconArchiveOutline20 },
+      { id: 'memory', label: '记忆库', hint: '可复用的团队经验', icon: IconGoalOutline16 },
+      { id: 'agent-config', label: 'Agent 配置', hint: '云端 Agent 参数', icon: IconAgentPresetOutline16 },
+    ],
   },
   {
-    id: 'projects',
-    label: '项目',
-    hint: '权限范围内的项目',
-    icon: IconFolderOpenOutline16,
+    id: 'work',
+    label: '工作',
+    items: [
+      { id: 'cloud-workspaces', label: '云工作空间', hint: '云端工程工作台', icon: IconQueueOutline14 },
+    ],
   },
   {
-    id: 'skills',
-    label: '团队 Skill',
-    hint: '团队能力目录',
-    icon: IconSkillOutline16,
-  },
-  {
-    id: 'knowledge',
-    label: '知识库',
-    hint: '项目资料与规范',
-    icon: IconArchiveOutline20,
-  },
-  {
-    id: 'memory',
-    label: '记忆库',
-    hint: '可复用的团队经验',
-    icon: IconGoalOutline16,
-  },
-  {
-    id: 'collector',
-    label: '数据采集',
-    hint: 'AI Coding 使用指标',
-    icon: IconDataOutline16,
-  },
-  {
-    id: 'agent-config',
-    label: 'Agent 配置',
-    hint: '云端 Agent 参数',
-    icon: IconAgentPresetOutline16,
+    id: 'review',
+    label: '复盘',
+    items: [
+      { id: 'collector', label: 'AI Coding 可观测', hint: '采集状态与使用指标', icon: IconDataOutline16 },
+    ],
   },
 ]
 
-const AGENTS: readonly [AgentConfig, ...AgentConfig[]] = [
-  {
-    id: 'frontend-reviewer',
-    name: '前端评审 Agent',
-    description: '面向组件、交互和可访问性变更的代码评审助手。',
-    status: '运行中',
-    model: 'DeepSeek-V3',
-    reasoning: '高',
-    accessMode: '只读评审',
-    skills: ['代码评审', '前端交互规范'],
-    autoContext: true,
-    concurrency: 3,
-    tokenBudget: '64k',
-    timeout: '10 分钟',
-    updated: '今天 10:24',
-  },
-  {
-    id: 'delivery-engineer',
-    name: '交付工程 Agent',
-    description: '根据项目任务执行实现、测试和交付检查。',
-    status: '运行中',
-    model: 'DeepSeek-Coder-V2',
-    reasoning: '中高',
-    accessMode: '工作区读写',
-    skills: ['代码评审', '接口设计', '前端交互规范'],
-    autoContext: true,
-    concurrency: 2,
-    tokenBudget: '128k',
-    timeout: '30 分钟',
-    updated: '昨天 18:06',
-  },
-  {
-    id: 'incident-helper',
-    name: '线上排障 Agent',
-    description: '关联日志、指标和变更记录，辅助定位线上问题。',
-    status: '已暂停',
-    model: 'DeepSeek-V3',
-    reasoning: '中',
-    accessMode: '日志与知识库',
-    skills: ['线上排障', '知识库检索'],
-    autoContext: false,
-    concurrency: 1,
-    tokenBudget: '32k',
-    timeout: '15 分钟',
-    updated: '周一 16:40',
-  },
-]
+function roleLabel(role: TeamSkillAccountRole): string {
+  return role === 'admin' ? '管理员' : role === 'manager' ? '经理' : '成员'
+}
 
 const LOCAL_ENVIRONMENT: TeamSkillEnvironment = {
   dshVersion: '0.1.1-rc.2',
@@ -158,7 +107,8 @@ const LOCAL_ENVIRONMENT: TeamSkillEnvironment = {
 }
 
 /** Root overlay: listens to the local controller and mounts the demo shell. */
-export function PlatformSurface({ controller, t, remote, useSessions, useWorkspaces }: PlatformSurfaceProps) {
+export function PlatformSurface(props: PlatformSurfaceProps) {
+  const { controller, t, remote, layout, useSessions, useWorkspaces, openSession, startSession } = props
   const open = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot)
 
   useEffect(() => {
@@ -173,11 +123,81 @@ export function PlatformSurface({ controller, t, remote, useSessions, useWorkspa
   }, [controller, open])
 
   if (!open) return null
-  return <PlatformShell controller={controller} t={t} remote={remote} useSessions={useSessions} useWorkspaces={useWorkspaces} />
+  return (
+    <PlatformShell
+      controller={controller}
+      t={t}
+      remote={remote}
+      layout={layout}
+      useSessions={useSessions}
+      useWorkspaces={useWorkspaces}
+      openSession={openSession}
+      startSession={startSession}
+    />
+  )
 }
 
-function PlatformShell({ controller, t, remote, useSessions, useWorkspaces }: Pick<PlatformSurfaceProps, 'controller' | 't' | 'remote' | 'useSessions' | 'useWorkspaces'>) {
+function PlatformShell({ controller, t, remote, layout, useSessions, useWorkspaces, openSession, startSession }: Pick<PlatformSurfaceProps, 'controller' | 't' | 'remote' | 'layout' | 'useSessions' | 'useWorkspaces' | 'openSession' | 'startSession'>) {
   const [view, setView] = useState<ViewId>('overview')
+  // Appearance (theme/density), rail collapse, and focus mode are visual-only
+  // state: none of them reorder content or touch business requests (spec §8).
+  const [appearance, setAppearanceState] = useState<Appearance>(() => DEFAULT_APPEARANCE)
+  const [railCollapsed, setRailCollapsed] = useState(false)
+  const [focusMode, setFocusMode] = useState<'off' | 'on'>('off')
+  const [capsuleOpen, setCapsuleOpen] = useState(false)
+  const [appearanceOpen, setAppearanceOpen] = useState(false)
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const [prefersDark, setPrefersDark] = useState(true)
+  const mobileNavToggleRef = useRef<HTMLButtonElement | null>(null)
+  const railRef2 = useRef<HTMLElement | null>(null)
+  useEffect(() => {
+    setAppearanceState(loadAppearance())
+    // jsdom and older hosts lack matchMedia: system theme just stays dark.
+    const media = typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : undefined
+    if (media === undefined) return
+    setPrefersDark(media.matches)
+    const onChange = (event: MediaQueryListEvent): void => {
+      setPrefersDark(event.matches)
+    }
+    media.addEventListener('change', onChange)
+    return () => {
+      media.removeEventListener('change', onChange)
+    }
+  }, [])
+  const resolvedTheme = resolveTheme(appearance.theme, prefersDark)
+  const setAppearance = (next: Appearance): void => {
+    setAppearanceState(next)
+    saveAppearance(next)
+  }
+  // Popovers sit above the surface, so their Escape handling must win over
+  // the surface-level close: capture phase closes the layer actually open.
+  // The mobile nav drawer joins the same layering order (rail first).
+  useEffect(() => {
+    if (!capsuleOpen && !appearanceOpen && !mobileNavOpen) return
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      if (mobileNavOpen) {
+        setMobileNavOpen(false)
+        mobileNavToggleRef.current?.focus()
+      }
+      setCapsuleOpen(false)
+      setAppearanceOpen(false)
+      event.stopPropagation()
+    }
+    document.addEventListener('keydown', onKeyDown, true)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown, true)
+    }
+  }, [capsuleOpen, appearanceOpen, mobileNavOpen])
+  // 打开移动导航：焦点进入导航第一项；关闭：焦点回到触发按钮。
+  useEffect(() => {
+    if (!mobileNavOpen) return
+    const previous = document.activeElement as HTMLElement | null
+    railRef2.current?.querySelector<HTMLButtonElement>('button')?.focus()
+    return () => {
+      previous?.focus({ preventScroll: true })
+    }
+  }, [mobileNavOpen])
   const [gate, setGate] = useState<AccountGate>('loading')
   const [account, setAccount] = useState<AuthenticatedAccount | undefined>()
   const [organizations, setOrganizations] = useState<readonly TeamSkillOrganization[]>([])
@@ -188,6 +208,8 @@ function PlatformShell({ controller, t, remote, useSessions, useWorkspaces }: Pi
   const [projectAssets, setProjectAssets] = useState<readonly TeamSkillProjectAsset[] | undefined>()
   const [knowledgeBases, setKnowledgeBases] = useState<readonly TeamSkillKnowledgeBaseSummary[]>([])
   const [selectedKnowledgeBaseIds, setSelectedKnowledgeBaseIds] = useState<Set<string>>(() => new Set())
+  // 服务端确认的本轮绑定数量：列表选择是待提交状态，绑定成功后才计入「已启用」。
+  const [knowledgeBoundCount, setKnowledgeBoundCount] = useState(0)
   const [knowledgeSearch, setKnowledgeSearch] = useState<TeamSkillKnowledgeSearchResponse | undefined>()
   const [knowledgePreview, setKnowledgePreview] = useState<TeamSkillKnowledgePreview | undefined>()
   const [detailProject, setDetailProject] = useState<Project | undefined>()
@@ -205,12 +227,80 @@ function PlatformShell({ controller, t, remote, useSessions, useWorkspaces }: Pi
   const [collectorError, setCollectorError] = useState<string | undefined>()
   const [collectorBusy, setCollectorBusy] = useState(false)
   const [collectorTick, setCollectorTick] = useState(0)
+  const [collectorRefreshedAt, setCollectorRefreshedAt] = useState<string | undefined>()
   const [confirmation, setConfirmation] = useState<{
     readonly message: string
+    readonly confirmLabel: string
     readonly resolve: (value: boolean) => void
   }>()
-  const [selectedAgentId, setSelectedAgentId] = useState(AGENTS[0].id)
+  const [permissionHintOpen, setPermissionHintOpen] = useState(false)
+  // Close the innermost overlay first: confirmation dialog above the account
+  // drawer above the surface. Each Escape press consumes exactly one layer.
+  useEffect(() => {
+    // Capture phase: this handler must observe Escape before the surface-level
+    // bubble listener regardless of listener registration order (this effect
+    // re-registers whenever an overlay opens or closes).
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      if (confirmation !== undefined) {
+        // Only the innermost overlay reacts; the surface-level close-on-Escape
+        // listener must not also fire for the same keypress.
+        event.stopPropagation()
+        const current = confirmation
+        setConfirmation(undefined)
+        current.resolve(false)
+        return
+      }
+      if (accountDrawerOpen) {
+        event.stopPropagation()
+        setAccountDrawerOpen(false)
+      }
+    }
+    document.addEventListener('keydown', onKeyDown, true)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown, true)
+    }
+  }, [confirmation, accountDrawerOpen])
+  const railRef = useRef<HTMLElement | null>(null)
+  const mainRef = useRef<HTMLElement | null>(null)
+  const overlayTrigger = useRef<HTMLElement | null>(null)
+  const overlayOpen = confirmation !== undefined || accountDrawerOpen
+  // While an overlay is open its backdrop masks the shell: the rail and the main
+  // column leave the accessibility tree and the tab order together, so focus
+  // cannot reach masked content. Closing hands focus back to the control that
+  // opened the overlay, once the shell is interactive again (a programmatic
+  // focus is dropped while `inert` is still set).
+  useEffect(() => {
+    for (const element of [railRef.current, mainRef.current]) {
+      if (element === null) continue
+      element.inert = overlayOpen
+      if (overlayOpen) element.setAttribute('aria-hidden', 'true')
+      else element.removeAttribute('aria-hidden')
+    }
+    if (overlayOpen) {
+      const active = document.activeElement
+      overlayTrigger.current = active instanceof HTMLElement && active !== document.body ? active : null
+      return
+    }
+    const trigger = overlayTrigger.current
+    overlayTrigger.current = null
+    trigger?.focus()
+  }, [overlayOpen])
+  // Focus enters the overlay that just opened: the confirmation dialog's first
+  // control, or the account drawer's close button.
+  useEffect(() => {
+    if (confirmation !== undefined) document.querySelector<HTMLButtonElement>('[aria-label="确认操作"] button')?.focus()
+    else if (accountDrawerOpen) document.querySelector<HTMLButtonElement>('[aria-label="关闭账号抽屉"]')?.focus()
+  }, [confirmation, accountDrawerOpen])
   const currentSessionId = useSessions(s => s.current)
+  const sessionSnapshot = useSessions(s => s)
+  // Native-session rows for the workbench switcher: plain strings plus the
+  // human-facing label, derived from the same snapshot the sidebar reads.
+  const nativeSessions = useMemo(() => ({
+    ids: sessionSnapshot.ids.map(String),
+    current: sessionSnapshot.current === undefined ? undefined : String(sessionSnapshot.current),
+    titleOf: (sessionId: string): string => sessionSnapshot.byId[sessionId as SessionId]?.displayTitle ?? sessionId,
+  }), [sessionSnapshot])
   const knowledgeBinding = useRef<
     | {
       readonly sessionId: string
@@ -246,6 +336,7 @@ function PlatformShell({ controller, t, remote, useSessions, useWorkspaces }: Pi
     if (sessionChanged) {
       setSelectedKnowledgeBaseIds(new Set())
       setKnowledgeSearch(undefined)
+      setKnowledgeBoundCount(0)
     }
     knowledgeSync.current = knowledgeSync.current
       .then(async () => {
@@ -253,19 +344,26 @@ function PlatformShell({ controller, t, remote, useSessions, useWorkspaces }: Pi
           const cleared = await remote.teamSkills.clearKnowledgeSelection(previous.sessionId)
           if (!cleared.ok) throw new Error(cleared.error.message)
         }
-        if (next === undefined || knowledgeBinding.current !== next) return
+        if (next === undefined || knowledgeBinding.current !== next) {
+          if (next === undefined && knowledgeBinding.current === undefined) setKnowledgeBoundCount(0)
+          return
+        }
         const configured = await remote.teamSkills.configureKnowledgeSelection(next.sessionId, {
           projectId: next.projectId,
           knowledgeBaseIds: next.knowledgeBaseIds,
         })
         if (!configured.ok) throw new Error(configured.error.message)
-        if (knowledgeBinding.current === next) setMessage(undefined)
+        if (knowledgeBinding.current === next) {
+          setMessage(undefined)
+          setKnowledgeBoundCount(next.knowledgeBaseIds.length)
+        }
       })
       .catch((error: unknown) => {
         if (knowledgeBinding.current === next) {
           knowledgeBinding.current = undefined
           setSelectedKnowledgeBaseIds(new Set())
           setKnowledgeSearch(undefined)
+          setKnowledgeBoundCount(0)
           setMessage(remoteFailureMessage(error))
         }
       })
@@ -418,6 +516,7 @@ function PlatformShell({ controller, t, remote, useSessions, useWorkspaces }: Pi
           return
         }
         setCollectorSnapshot(result.value)
+        setCollectorRefreshedAt(new Date().toISOString())
       })
       .catch((error: unknown) => {
         if (requestId !== collectorRequest.current) return
@@ -439,16 +538,19 @@ function PlatformShell({ controller, t, remote, useSessions, useWorkspaces }: Pi
 
   const collectorAction = async (action: 'pause' | 'resume' | 'flush' | 'clear'): Promise<void> => {
     if (collectorBusy) return
-    if (
-      action === 'clear' &&
-      !(await new Promise<boolean>((resolve) => {
+    if (action === 'clear') {
+      const pending = collectorSnapshot !== undefined && collectorSnapshot.status === 'ready'
+        ? collectorSnapshot.value.queueEventCount
+        : undefined
+      const accepted = await new Promise<boolean>((resolve) => {
         setConfirmation({
-          message: '清空后所有未发送事件将被删除，并记录 manual_clear 数据缺口。确定清空未上报数据？',
+          message: `将丢弃 ${pending === undefined ? '未知条数（请先刷新状态）' : `${pending} 条`}未上报事件，并记录 manual_clear 数据缺口。`,
+          confirmLabel: '确认清理',
           resolve,
         })
-      }))
-    )
-      return
+      })
+      if (!accepted) return
+    }
     setCollectorBusy(true)
     const requestId = ++collectorRequest.current
     try {
@@ -500,31 +602,53 @@ function PlatformShell({ controller, t, remote, useSessions, useWorkspaces }: Pi
           item.organizationId === organizationFilterId,
       )
   }, [access, organizationFilterId, projectAssets, projectId])
-  const selectedAgent = AGENTS.find(item => item.id === selectedAgentId) ?? AGENTS[0]
-
   const showError = (next: string): void => {
     setMessage(next)
-    setGate('error')
+    setGate('service-error')
+  }
+  const showFailure = (value: HostFailure): void => {
+    if (value.status === 'not-ready') {
+      setMessage(`服务端未就绪：缺少 ${value.missing.join('、')}`)
+      setGate('not-ready')
+      return
+    }
+    setMessage(value.message.length > 0 ? `${value.message}（${value.code}）` : value.code)
+    setGate(isForbiddenCode(value.code) ? 'forbidden' : 'service-error')
+  }
+
+  // Clears everything scoped to the signed-in account: project selection and
+  // detail, knowledge binding and search, memory and collector bindings. The
+  // signed-out gate must never leave account-scoped data on screen.
+  const resetAccountScope = (): void => {
+    projectRequest.current += 1
+    knowledgeRequest.current += 1
+    memoryBindingGeneration.current += 1
+    memoryBinding.current = undefined
+    memoryRequest.current += 1
+    setMemories([])
+    setMemoryPage(undefined)
+    setMemoryError(undefined)
+    setMemoryKeyword(undefined)
+    collectorBindingGeneration.current += 1
+    collectorBinding.current = undefined
+    collectorRequest.current += 1
+    setCollectorSnapshot(undefined)
+    setCollectorError(undefined)
+    setProjectAssets(undefined)
+    setDetailProject(undefined)
+    setKnowledgeBases([])
+    setSelectedKnowledgeBaseIds(new Set())
+    setKnowledgeSearch(undefined)
+    setKnowledgePreview(undefined)
   }
 
   const consumeAccount = async (value: TeamSkillAccountResult<TeamSkillAccountState>): Promise<void> => {
     if (isHostFailure(value)) {
-      showError(hostFailureMessage(value))
+      showFailure(value)
       return
     }
     if (value.status === 'signed-out') {
-      memoryBindingGeneration.current += 1
-      memoryBinding.current = undefined
-      memoryRequest.current += 1
-      setMemories([])
-      setMemoryPage(undefined)
-      setMemoryError(undefined)
-      setMemoryKeyword(undefined)
-      collectorBindingGeneration.current += 1
-      collectorBinding.current = undefined
-      collectorRequest.current += 1
-      setCollectorSnapshot(undefined)
-      setCollectorError(undefined)
+      resetAccountScope()
       setAccount(undefined)
       setOrganizations([])
       setAccess(undefined)
@@ -571,7 +695,12 @@ function PlatformShell({ controller, t, remote, useSessions, useWorkspaces }: Pi
         showError(projectsResult.error.message)
         return
       }
-      if (isHostFailure(projectsResult.value) || isSignedOut(projectsResult.value)) {
+      if (isHostFailure(projectsResult.value)) {
+        showFailure(projectsResult.value)
+        return
+      }
+      if (isSignedOut(projectsResult.value)) {
+        resetAccountScope()
         setGate('signed-out')
         return
       }
@@ -580,7 +709,12 @@ function PlatformShell({ controller, t, remote, useSessions, useWorkspaces }: Pi
         return
       }
       const accessValue = accessResult.value
-      if (isHostFailure(accessValue) || isSignedOut(accessValue) || !isAccessSummary(accessValue)) {
+      if (isHostFailure(accessValue)) {
+        showFailure(accessValue)
+        return
+      }
+      if (isSignedOut(accessValue) || !isAccessSummary(accessValue)) {
+        resetAccountScope()
         setGate('signed-out')
         return
       }
@@ -629,8 +763,10 @@ function PlatformShell({ controller, t, remote, useSessions, useWorkspaces }: Pi
     const value = result.value
     if (isHostFailure(value) || isSignedOut(value)) {
       setProjectAssets(undefined)
-      if (isSignedOut(value)) setGate('signed-out')
-      else showError(hostFailureMessage(value))
+      if (isSignedOut(value)) {
+        resetAccountScope()
+        setGate('signed-out')
+      } else showFailure(value)
       return
     }
     setDetailProject(projectModel(value.project))
@@ -647,7 +783,10 @@ function PlatformShell({ controller, t, remote, useSessions, useWorkspaces }: Pi
       if (isHostFailure(knowledge.value) || isSignedOut(knowledge.value)) {
         setKnowledgeBases([])
         setSelectedKnowledgeBaseIds(new Set())
-        showError(isSignedOut(knowledge.value) ? '账号已退出，请重新登录。' : hostFailureMessage(knowledge.value))
+        if (isSignedOut(knowledge.value)) {
+          resetAccountScope()
+          setGate('signed-out')
+        } else showFailure(knowledge.value)
         return
       }
       setKnowledgeBases(knowledge.value.filter(item => item.state === 'active' && item.searchable))
@@ -710,11 +849,7 @@ function PlatformShell({ controller, t, remote, useSessions, useWorkspaces }: Pi
             setMessage(remoteFailureMessage(error))
           })
       }
-      memoryRequest.current += 1
-      setMemories([])
-      setMemoryPage(undefined)
-      setMemoryError(undefined)
-      setMemoryKeyword(undefined)
+      resetAccountScope()
       clearStoredProjectId(currentStorageKey(account?.user.userId))
       setBusy(false)
       setAccount(undefined)
@@ -769,9 +904,90 @@ function PlatformShell({ controller, t, remote, useSessions, useWorkspaces }: Pi
     void loadProjectDetail(nextProjectId, true)
   }
 
+  const renderNavItem = (item: NavItem, densityProbe = false): ReactNode => {
+    const Icon = item.icon
+    const active = view === item.id
+    return (
+      <button
+        key={item.id}
+        type="button"
+        {...(densityProbe ? { 'data-density-probe': '' } : {})}
+        className={active ? `${css.navItem} ${css.navItemActive}` : css.navItem}
+        aria-label={item.label}
+        aria-current={active ? 'page' : undefined}
+        onClick={() => {
+          setView(item.id)
+          setMobileNavOpen(false)
+        }}
+      >
+        <Icon size={16} />
+        <span>{item.label}</span>
+        <small>{item.hint}</small>
+      </button>
+    )
+  }
+
+  // The docked workbench borrows the frame's right edge: reserve exactly the
+  // rendered surface width so the native conversation column shrinks beside
+  // it instead of being covered. The surface width depends on the viewport
+  // alone, so measuring it cannot feed back into the layout.
+  const surfaceRef = useRef<HTMLDivElement | null>(null)
+  const docked = view === 'cloud-workspaces'
+  // docked 工作台进入时收窄侧栏（64px 图标栏）；退出时恢复展开。
+  useEffect(() => {
+    setRailCollapsed(docked)
+  }, [docked])
+  useEffect(() => {
+    if (!docked) {
+      layout.reserveRight(0)
+      return
+    }
+    const el = surfaceRef.current
+    /* v8 ignore next -- the ref is always attached by effect time. */
+    if (el === null) return
+    const observer = new ResizeObserver(() => {
+      layout.reserveRight(el.getBoundingClientRect().width)
+    })
+    observer.observe(el)
+    return () => {
+      observer.disconnect()
+      layout.reserveRight(0)
+    }
+  }, [docked, layout])
+
   return (
-    <div className={css.surface} role="dialog" aria-modal="true" aria-label={t('platform.name')}>
-      <aside className={css.rail}>
+    <div
+      ref={surfaceRef}
+      className={docked ? `${css.surface} ${css.surfaceDocked}` : css.surface}
+      data-style-surface=""
+      data-theme={resolvedTheme}
+      data-density={appearance.density}
+      data-focus-mode={focusMode}
+      data-rail-collapsed={railCollapsed ? 'true' : 'false'}
+      role="dialog"
+      // Docked workbench keeps the resident native session interactive
+      // beside it, so the dialog stops being modal for that view.
+      aria-modal={docked ? undefined : true}
+      aria-label={t('platform.name')}
+    >
+      <div
+        className={css.mobileNavScrim}
+        data-mobile-nav-scrim={mobileNavOpen ? 'open' : undefined}
+        aria-hidden="true"
+        onClick={() => {
+          setMobileNavOpen(false)
+        }}
+      />
+      <aside
+        ref={(node) => {
+          railRef.current = node
+          railRef2.current = node
+        }}
+        className={css.rail}
+        aria-label="平台导航"
+        data-app-rail=""
+        data-mobile-nav={mobileNavOpen ? 'open' : undefined}
+      >
         <div className={css.brandBlock}>
           <div className={css.brandMark} aria-hidden="true">
             <IconSparkle16 size={18} />
@@ -780,54 +996,30 @@ function PlatformShell({ controller, t, remote, useSessions, useWorkspaces }: Pi
             <strong>{t('platform.name')}</strong>
             <span>AI CODING PLATFORM</span>
           </div>
+          <button
+            type="button"
+            className={css.railToggle}
+            aria-label={railCollapsed ? '展开侧栏' : '折叠侧栏'}
+            title={railCollapsed ? '展开侧栏' : '折叠侧栏'}
+            onClick={() => {
+              setRailCollapsed(value => !value)
+            }}
+          >
+            {railCollapsed ? <IconChevronRightOutline14 size={16} /> : <IconChevronLeftOutline14 size={16} />}
+          </button>
         </div>
-
-        {gate === 'ready' && account !== undefined && (
-          <label className={css.projectPicker}>
-            <span>当前项目</span>
-            <select
-              aria-label="当前项目"
-              value={projectId ?? ''}
-              onChange={(event) => {
-                selectProject(event.target.value, view)
-              }}
-            >
-              <option value="">选择项目</option>
-              {groupProjects(serviceProjects).map(group => (
-                <optgroup key={group.organizationId} label={group.organizationName}>
-                  {group.projects.map(item => (
-                    <option key={item.projectId} value={item.projectId}>
-                      {item.name}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
-          </label>
-        )}
 
         {gate === 'ready' && (
           <nav className={css.nav} aria-label="平台模块">
-            {NAV_ITEMS.map((item) => {
-              const Icon = item.icon
-              const active = view === item.id
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  className={active ? `${css.navItem} ${css.navItemActive}` : css.navItem}
-                  aria-label={item.label}
-                  aria-current={active ? 'page' : undefined}
-                  onClick={() => {
-                    setView(item.id)
-                  }}
-                >
-                  <Icon size={16} />
-                  <span>{item.label}</span>
-                  <small>{item.hint}</small>
-                </button>
-              )
-            })}
+            {renderNavItem(OVERVIEW_NAV_ITEM, true)}
+            {NAV_GROUPS.map(group => (
+              <div key={group.id} role="group" aria-label={group.label} className={css.navGroup}>
+                <span className={css.navGroupLabel} aria-hidden="true">
+                  {group.label}
+                </span>
+                {group.items.map(item => renderNavItem(item))}
+              </div>
+            ))}
           </nav>
         )}
 
@@ -841,54 +1033,238 @@ function PlatformShell({ controller, t, remote, useSessions, useWorkspaces }: Pi
               </div>
             </div>
           )}
-          {gate === 'ready' && account !== undefined ? (
-            <button
-              type="button"
-              className={css.userButton}
-              aria-label={`账号与权限：${account.user.displayName}`}
-              onClick={() => {
-                setAccountDrawerOpen(true)
-              }}
-            >
-              <span className={css.avatar}>{account.user.displayName.slice(0, 1)}</span>
-              <span>
-                <strong>{account.user.displayName}</strong>
-                <small>{account.user.email}</small>
-              </span>
-              <IconUserOutline16 size={15} />
-            </button>
-          ) : null}
+          {gate === 'ready' && account !== undefined && (
+            <div role="group" aria-label="账户" className={css.accountGroup}>
+              <button
+                type="button"
+                className={css.userButton}
+                aria-label={`账号与权限：${account.user.displayName}`}
+                onClick={() => {
+                  setAccountDrawerOpen(true)
+                }}
+              >
+                <span className={css.avatar}>{account.user.displayName.slice(0, 1)}</span>
+                <span>
+                  <strong>{account.user.displayName}</strong>
+                  <small>{account.user.email}</small>
+                </span>
+                <IconUserOutline16 size={16} />
+              </button>
+            </div>
+          )}
         </div>
       </aside>
 
-      <main className={css.main}>
-        <header className={css.topbar}>
-          <div className={css.breadcrumb}>
-            <span>DSH</span>
-            <span>/</span>
-            <strong>{gate === 'ready' ? NAV_ITEMS.find(item => item.id === view)?.label : gate === 'signed-out' ? '登录' : '账号验证'}</strong>
+      <main ref={mainRef} className={css.main}>
+        <header className={css.topbar} data-page-toolbar="">
+          <button
+            type="button"
+            ref={mobileNavToggleRef}
+            className={css.mobileNavToggle}
+            aria-label={mobileNavOpen ? '关闭导航' : '打开导航'}
+            title={mobileNavOpen ? '关闭导航' : '打开导航'}
+            aria-expanded={mobileNavOpen}
+            onClick={() => {
+              setMobileNavOpen(value => !value)
+            }}
+          >
+            <IconQueueOutline14 size={18} />
+          </button>
+          <div className={css.contextBar} role="group" aria-label="当前上下文">
+            {gate === 'ready' && account !== undefined && (
+              <>
+                <span className={css.contextItem}>
+                  <small>组织</small>
+                  <strong title={organizationFilterId === undefined ? '全部可见组织' : organizations.find(item => item.organizationId === organizationFilterId)?.name ?? '全部可见组织'}>{organizationFilterId === undefined ? '全部可见组织' : organizations.find(item => item.organizationId === organizationFilterId)?.name ?? '全部可见组织'}</strong>
+                </span>
+                <label className={`${css.contextItem} ${css.contextItemProject}`}>
+                  <small>项目</small>
+                  <select
+                    aria-label="当前项目"
+                    value={projectId ?? ''}
+                    onChange={(event) => {
+                      selectProject(event.target.value, view)
+                    }}
+                  >
+                    <option value="">选择项目</option>
+                    {groupProjects(serviceProjects).map(group => (
+                      <optgroup key={group.organizationId} label={group.organizationName}>
+                        {group.projects.map(item => (
+                          <option key={item.projectId} value={item.projectId}>
+                            {item.name}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                </label>
+                <span className={css.contextItem}>
+                  <small>账号</small>
+                  <strong>{account.user.displayName}</strong>
+                </span>
+                <span className={css.contextItem}>
+                  <small>角色</small>
+                  <strong>{roleLabel(account.user.globalRole)}</strong>
+                </span>
+                <span className={css.contextItem}>
+                  <small>数据来源</small>
+                  <strong className={css.provenanceBadge} data-provenance="fixture-only" title="当前数据来自本地联调服务（fixture），不代表生产环境。">
+                    fixture-only
+                  </strong>
+                </span>
+              </>
+            )}
+            {gate !== 'ready' && (
+              <span className={css.contextItem}>
+                <strong>{gate === 'signed-out' ? '登录' : '账号验证'}</strong>
+              </span>
+            )}
           </div>
           <div className={css.topbarActions}>
-            <span className={css.connection}>
-              <span className={gate === 'ready' ? css.statusLive : css.statusWarn} />
-              {gate === 'ready' ? '服务已连接' : '需要登录'}
-            </span>
+            {docked && (
+              <button
+                type="button"
+                className={css.outlineButton}
+                aria-pressed={focusMode === 'on'}
+                onClick={() => {
+                  setFocusMode(value => (value === 'on' ? 'off' : 'on'))
+                }}
+              >
+                {focusMode === 'on' ? '退出专注模式' : '进入专注模式'}
+              </button>
+            )}
+            <button
+              type="button"
+              className={css.statusCapsule}
+              data-status-capsule=""
+              aria-label="系统状态胶囊"
+              aria-haspopup="dialog"
+              aria-expanded={capsuleOpen}
+              onClick={() => {
+                setCapsuleOpen(value => !value)
+              }}
+            >
+              <span className={gate === 'ready' ? css.statusLive : css.statusWarn} aria-hidden="true" />
+              {gate === 'ready' ? '已连接' : gate === 'loading' ? '同步中' : '需要处理'}
+            </button>
+            {capsuleOpen && (
+              <div className={css.topbarPopover} role="dialog" aria-label="系统状态" data-style-drawer="" data-status-capsule-popover="">
+                <dl>
+                  <div>
+                    <dt>连接</dt>
+                    <dd>{gate === 'ready' ? '服务已连接' : gate === 'loading' ? '正在同步账号与访问范围' : '需要处理：账号验证未完成'}</dd>
+                  </div>
+                  <div>
+                    <dt>账号</dt>
+                    <dd>{account?.user.displayName ?? '未登录'}</dd>
+                  </div>
+                  <div>
+                    <dt>项目</dt>
+                    <dd>{project?.name ?? '未选择'}</dd>
+                  </div>
+                  <div>
+                    <dt>运行</dt>
+                    <dd>{view === 'cloud-workspaces' ? '云工作空间会话进行中' : '当前视图无运行任务'}</dd>
+                  </div>
+                  <div>
+                    <dt>数据来源</dt>
+                    <dd>本地联调服务（fixture-only），非生产环境</dd>
+                  </div>
+                </dl>
+              </div>
+            )}
+            <button
+              type="button"
+              className={css.iconGhost}
+              aria-label="外观设置"
+              title="外观设置"
+              aria-haspopup="dialog"
+              aria-expanded={appearanceOpen}
+              onClick={() => {
+                setAppearanceOpen(value => !value)
+              }}
+            >
+              <IconSettingsOutline14 size={16} />
+            </button>
+            {appearanceOpen && (
+              <div className={css.topbarPopover} role="dialog" aria-label="外观设置">
+                <fieldset>
+                  <legend>主题</legend>
+                  <label>
+                    <input type="radio" name="dsh-theme" checked={appearance.theme === 'light'} onChange={() => { setAppearance({ ...appearance, theme: 'light' }) }} />
+                    浅色
+                  </label>
+                  <label>
+                    <input type="radio" name="dsh-theme" checked={appearance.theme === 'dark'} onChange={() => { setAppearance({ ...appearance, theme: 'dark' }) }} />
+                    深色
+                  </label>
+                  <label>
+                    <input type="radio" name="dsh-theme" checked={appearance.theme === 'system'} onChange={() => { setAppearance({ ...appearance, theme: 'system' }) }} />
+                    跟随系统
+                  </label>
+                </fieldset>
+                <fieldset>
+                  <legend>密度</legend>
+                  <label>
+                    <input type="radio" name="dsh-density" checked={appearance.density === 'compact'} onChange={() => { setAppearance({ ...appearance, density: 'compact' }) }} />
+                    紧凑
+                  </label>
+                  <label>
+                    <input type="radio" name="dsh-density" checked={appearance.density === 'comfortable'} onChange={() => { setAppearance({ ...appearance, density: 'comfortable' }) }} />
+                    舒适
+                  </label>
+                </fieldset>
+              </div>
+            )}
             <button type="button" className={css.closeButton} aria-label={t('platform.close')} title={t('platform.close')} onClick={controller.close}>
               <IconCloseOutline16 size={16} />
             </button>
           </div>
         </header>
 
-        {gate === 'loading' && <GateState title="正在验证账号" message="正在从 Host 读取服务端身份和访问范围。" />}
+        {gate === 'loading' && <StatePanel state="loading" title="正在验证账号" reason="正在从 Host 读取服务端身份和访问范围。" />}
         {gate === 'signed-out' && <LoginView busy={busy} error={message} onLogin={login} />}
-        {gate === 'error' && (
-          <GateState
-            title="账号服务暂不可用"
-            message={message ?? '无法读取服务端授权，请稍后重试。'}
+        {gate === 'not-ready' && (
+          <StatePanel
+            state="not-ready"
+            title="服务未就绪"
+            reason={message ?? 'Host 配置缺失，无法读取服务端数据。'}
+            impact="就绪之前不会展示任何项目或资产数据。"
+            action={
+              <button type="button" className={css.primaryButton} onClick={controller.close}>
+                返回
+              </button>
+            }
+          />
+        )}
+        {gate === 'forbidden' && (
+          <StatePanel
+            state="forbidden"
+            title="无权访问"
+            reason={message ?? '服务端拒绝了当前账号的读取请求。'}
+            impact="权限由服务端授予；重新发起同一请求不会改变结果。"
+            action={
+              <button type="button" className={css.outlineButton} onClick={() =>{  setPermissionHintOpen(open => !open) }}>
+                查看权限说明
+              </button>
+            }
+          >
+            {permissionHintOpen && (
+              <p className={css.stateImpact}>
+                访问范围由组织成员关系与项目成员关系决定；请联系管理员在后台为你添加对应成员关系。
+              </p>
+            )}
+          </StatePanel>
+        )}
+        {gate === 'service-error' && (
+          <StatePanel
+            state="service-error"
+            title="服务暂时不可用"
+            reason={message ?? '无法读取服务端数据，请稍后重试。'}
             action={
               <button type="button" className={css.primaryButton} onClick={() => void loadAccount()}>
-                <IconRefreshOutline16 size={15} />
-                重新连接
+                <IconRefreshOutline16 size={16} />
+                重新加载
               </button>
             }
           />
@@ -900,112 +1276,165 @@ function PlatformShell({ controller, t, remote, useSessions, useWorkspaces }: Pi
           </div>
         )}
         {gate === 'ready' && access !== undefined && (
-          <div className={css.content}>
-            {view === 'overview' && <AssetOverviewView projects={availableProjects} assets={visibleAssets} onNavigate={setView} />}
-            {view === 'projects' && (
-              <ProjectsView
-                project={detailProject ?? project}
-                projectId={(detailProject ?? project)?.id}
-                projects={availableProjects}
-                onProjectChange={(projectId) => {
-                  void loadProjectDetail(projectId, false)
-                }}
-              />
-            )}
-            {view === 'skills' && (
-              <TeamSkillsView
-                remote={remote}
-                useWorkspaces={useWorkspaces}
-                {...(project === undefined ? {} : { projectId: project.id })}
-                projects={visibleServiceProjects}
-                onProjectSelect={(projectId) => {
-                  selectProject(projectId, 'skills')
-                }}
-                environment={LOCAL_ENVIRONMENT}
-                onAuthorizationFailure={() => void refreshAuthorization()}
-              />
-            )}
-            {view === 'knowledge' && (
-              <KnowledgeView
-                projectId={projectId}
-                knowledgeBases={knowledgeBases}
-                selectedIds={selectedKnowledgeBaseIds}
-                onSelectionChange={setSelectedKnowledgeBaseIds}
-                search={knowledgeSearch}
-                preview={knowledgePreview}
-                onSearch={async (query) => {
-                  if (projectId === undefined || selectedKnowledgeBaseIds.size === 0) return
-                  const request = ++knowledgeRequest.current
-                  const result = await remote.teamSkills.knowledgeSearch({
-                    projectId,
-                    knowledgeBaseIds: [...selectedKnowledgeBaseIds],
-                    query,
-                  })
-                  if (request !== knowledgeRequest.current) return
-                  if (!result.ok) {
-                    setMessage(result.error.message)
-                    return
+          <div className={css.content} data-page-content="">
+            {/* Page transition: opacity + 6px rise; the key remount matches the
+                existing per-view conditional unmount, so no state survives that
+                did not survive before. */}
+            <div key={view} className={css.viewEnter}>
+              {view === 'overview' && (
+                <AssetOverviewView
+                  project={project}
+                  assets={visibleAssets}
+                  remote={remote}
+                  onOpenProject={() => {
+                    setView('projects')
+                  }}
+                  onOpenWorkspace={() => {
+                    setView('cloud-workspaces')
+                  }}
+                  onSelectProject={() => {
+                    document.querySelector<HTMLSelectElement>('select[aria-label="当前项目"]')?.focus()
+                  }}
+                  onAuthorizationFailure={() => void refreshAuthorization()}
+                />
+              )}
+              {view === 'projects' && (
+                <ProjectsView
+                  project={detailProject ?? project}
+                  projects={availableProjects}
+                  onProjectChange={(projectId) => {
+                    void loadProjectDetail(projectId, false)
+                  }}
+                />
+              )}
+              {view === 'skills' && (
+                <TeamSkillsView
+                  remote={remote}
+                  useWorkspaces={useWorkspaces}
+                  {...(project === undefined ? {} : { projectId: project.id })}
+                  projects={visibleServiceProjects}
+                  onProjectSelect={(projectId) => {
+                    selectProject(projectId, 'skills')
+                  }}
+                  environment={LOCAL_ENVIRONMENT}
+                  onAuthorizationFailure={() => void refreshAuthorization()}
+                />
+              )}
+              {view === 'cloud-workspaces' && (
+                <CloudWorkspacesView
+                  remote={remote}
+                  useWorkspaces={useWorkspaces}
+                  {...(project === undefined ? {} : { projectId: project.id })}
+                  projects={visibleServiceProjects}
+                  {...(currentSessionId === undefined ? {} : { sessionId: currentSessionId })}
+                  nativeSessions={nativeSessions}
+                  openSession={(sessionId) => { openSession(sessionId as SessionId) }}
+                  startSession={startSession}
+                  {...(account === undefined ? {} : { accountId: account.user.userId })}
+                  onProjectSelect={(projectId) => {
+                    selectProject(projectId, 'cloud-workspaces')
+                  }}
+                  onAuthorizationFailure={() => void refreshAuthorization()}
+                />
+              )}
+              {view === 'knowledge' && (
+                <KnowledgeView
+                  projectId={projectId}
+                  knowledgeBases={knowledgeBases}
+                  selectedIds={selectedKnowledgeBaseIds}
+                  boundCount={knowledgeBoundCount}
+                  onSelectionChange={setSelectedKnowledgeBaseIds}
+                  onClearSelection={() => {
+                    setSelectedKnowledgeBaseIds(new Set())
+                  }}
+                  search={knowledgeSearch}
+                  preview={knowledgePreview}
+                  onSearch={async (query) => {
+                    if (projectId === undefined || selectedKnowledgeBaseIds.size === 0) return
+                    const request = ++knowledgeRequest.current
+                    const result = await remote.teamSkills.knowledgeSearch({
+                      projectId,
+                      knowledgeBaseIds: [...selectedKnowledgeBaseIds],
+                      query,
+                    })
+                    if (request !== knowledgeRequest.current) return
+                    if (!result.ok) {
+                      setMessage(result.error.message)
+                      return
+                    }
+                    if (isHostFailure(result.value) || isSignedOut(result.value)) {
+                      setMessage(isSignedOut(result.value) ? '账号已退出，请重新登录。' : hostFailureMessage(result.value))
+                      return
+                    }
+                    setKnowledgeSearch(result.value.response)
+                  }}
+                  onPreview={async (knowledgeBaseId, documentId) => {
+                    const result = await remote.teamSkills.knowledgePreview(knowledgeBaseId, documentId)
+                    if (!result.ok) {
+                      setMessage(result.error.message)
+                      return
+                    }
+                    if (isHostFailure(result.value) || isSignedOut(result.value)) {
+                      setMessage(isSignedOut(result.value) ? '账号已退出，请重新登录。' : hostFailureMessage(result.value))
+                      return
+                    }
+                    setKnowledgePreview(result.value)
+                  }}
+                />
+              )}
+              {view === 'memory' && (
+                <MemoryView
+                  projectId={projectId}
+                  memories={memories}
+                  page={memoryPage}
+                  loading={memoryLoading}
+                  error={memoryError}
+                  remote={remote}
+                  keyword={memoryKeyword}
+                  onSearch={(keyword) => {
+                    setMemoryKeyword(keyword.length === 0 ? undefined : keyword)
+                    setMemoryRefresh(value => value + 1)
+                  }}
+                  onLoadMore={() => void loadMoreMemories()}
+                  onRefresh={() => {
+                    setMemoryRefresh(value => value + 1)
+                  }}
+                  onConfirm={(message, confirmLabel) =>
+                    new Promise<boolean>((resolve) => {
+                      setConfirmation({ message, confirmLabel: confirmLabel ?? '确认', resolve })
+                    })
                   }
-                  if (isHostFailure(result.value) || isSignedOut(result.value)) {
-                    setMessage(isSignedOut(result.value) ? '账号已退出，请重新登录。' : hostFailureMessage(result.value))
-                    return
-                  }
-                  setKnowledgeSearch(result.value.response)
-                }}
-                onPreview={async (knowledgeBaseId, documentId) => {
-                  const result = await remote.teamSkills.knowledgePreview(knowledgeBaseId, documentId)
-                  if (!result.ok) {
-                    setMessage(result.error.message)
-                    return
-                  }
-                  if (isHostFailure(result.value) || isSignedOut(result.value)) {
-                    setMessage(isSignedOut(result.value) ? '账号已退出，请重新登录。' : hostFailureMessage(result.value))
-                    return
-                  }
-                  setKnowledgePreview(result.value)
-                }}
-              />
-            )}
-            {view === 'memory' && (
-              <MemoryView
-                projectId={projectId}
-                memories={memories}
-                page={memoryPage}
-                loading={memoryLoading}
-                error={memoryError}
-                remote={remote}
-                keyword={memoryKeyword}
-                onSearch={(keyword) => {
-                  setMemoryKeyword(keyword.length === 0 ? undefined : keyword)
-                  setMemoryRefresh(value => value + 1)
-                }}
-                onLoadMore={() => void loadMoreMemories()}
-                onRefresh={() => {
-                  setMemoryRefresh(value => value + 1)
-                }}
-                onConfirm={message =>
-                  new Promise<boolean>((resolve) => {
-                    setConfirmation({ message, resolve })
-                  })
-                }
-              />
-            )}
-            {view === 'collector' && (
-              <CollectorView
-                projectId={projectId}
-                snapshot={collectorSnapshot}
-                loading={collectorLoading}
-                error={collectorError}
-                busy={collectorBusy}
-                onRefresh={() => {
-                  setCollectorTick(tick => tick + 1)
-                }}
-                onAction={(action) => {
-                  void collectorAction(action)
-                }}
-              />
-            )}
-            {view === 'agent-config' && <AgentConfigView agent={selectedAgent} agents={AGENTS} onAgentSelect={setSelectedAgentId} />}
+                />
+              )}
+              {view === 'collector' && (
+                <CollectorView
+                  projectId={projectId}
+                  snapshot={collectorSnapshot}
+                  loading={collectorLoading}
+                  error={collectorError}
+                  busy={collectorBusy}
+                  refreshedAt={collectorRefreshedAt}
+                  onRefresh={() => {
+                    setCollectorTick(tick => tick + 1)
+                  }}
+                  onAction={(action) => {
+                    void collectorAction(action)
+                  }}
+                />
+              )}
+              {view === 'agent-config' && (
+                <AgentConfigView
+                  remote={remote}
+                  {...(project === undefined ? {} : { projectId: project.id })}
+                  projects={visibleServiceProjects}
+                  onProjectSelect={(selectedProjectId) => {
+                    selectProject(selectedProjectId, 'agent-config')
+                  }}
+                  {...(account === undefined ? {} : { accountId: account.user.userId })}
+                  onAuthorizationFailure={() => void refreshAuthorization()}
+                />
+              )}
+            </div>
           </div>
         )}
       </main>
@@ -1013,9 +1442,11 @@ function PlatformShell({ controller, t, remote, useSessions, useWorkspaces }: Pi
         <AccountDrawer
           account={account}
           organizations={organizations}
+          access={access}
           selectedOrganizationId={organizationFilterId}
           onClose={() => {
             setAccountDrawerOpen(false)
+            document.querySelector<HTMLButtonElement>('[aria-label^="账号与权限"]')?.focus()
           }}
           onOrganizationChange={(next) => {
             projectRequest.current += 1
@@ -1060,7 +1491,7 @@ function PlatformShell({ controller, t, remote, useSessions, useWorkspaces }: Pi
                   current.resolve(true)
                 }}
               >
-                确认
+                {confirmation.confirmLabel}
               </button>
             </div>
           </section>
@@ -1070,8 +1501,17 @@ function PlatformShell({ controller, t, remote, useSessions, useWorkspaces }: Pi
   )
 }
 
-type AccountGate = 'loading' | 'signed-out' | 'error' | 'change-password' | 'ready'
+type AccountGate = 'loading' | 'signed-out' | 'not-ready' | 'forbidden' | 'service-error' | 'change-password' | 'ready'
 type AuthenticatedAccount = Extract<TeamSkillAccountState, { readonly status: 'authenticated' }>
+type HostFailure =
+  | { readonly status: 'not-ready'; readonly missing: readonly string[] }
+  | { readonly status: 'failed'; readonly code: string; readonly message: string }
+
+// Only permission denials are forbidden; UNAUTHORIZED/TOKEN_* are session
+// failures recovered by reloading the account, not by reading scope help.
+function isForbiddenCode(code: string): boolean {
+  return code.includes('FORBIDDEN')
+}
 
 function LoginView({
   busy,
@@ -1130,7 +1570,7 @@ function LoginView({
           </span>
         )}
         <button type="submit" className={css.primaryButton} disabled={busy || username.trim().length === 0 || password.length === 0}>
-          <IconSparkle16 size={15} />
+          <IconSparkle16 size={16} />
           {busy ? '正在登录…' : '登录'}
         </button>
       </form>
@@ -1215,7 +1655,7 @@ function ChangePasswordView({
           </span>
         )}
         <button type="submit" className={css.primaryButton} disabled={busy || mismatch || newPassword.length === 0}>
-          <IconSettingsOutline14 size={15} />
+          <IconSettingsOutline14 size={16} />
           {busy ? '正在保存…' : '保存新密码'}
         </button>
       </form>
@@ -1223,130 +1663,239 @@ function ChangePasswordView({
   )
 }
 
+const WORKSPACE_STATUS_LABELS: Record<string, string> = {
+  creating: '创建中',
+  provisioning: '创建中',
+  ready: '就绪',
+  degraded: '降级',
+  busy: '忙',
+  stopped: '已停止',
+  archived: '已归档',
+  failed: '失败',
+  deleting: '删除中',
+  unknown: '未知',
+}
+
+const RUN_STATUS_LABELS: Record<string, string> = {
+  queued: '排队中',
+  running: '运行中',
+  succeeded: '已成功',
+  failed: '失败',
+  cancelled: '已取消',
+  awaiting_approval: '待审批',
+}
+
+/** Overview of the current project only: name, status, workspace, default
+ * agent, asset readiness and the latest run. Workspace facts come from the
+ * cloudWorkspaces Remote; failures render as a state panel, never as fake
+ * values. */
 function AssetOverviewView({
-  projects,
+  project,
   assets,
-  onNavigate,
+  remote,
+  onOpenProject,
+  onOpenWorkspace,
+  onSelectProject,
+  onAuthorizationFailure,
 }: {
-  projects: readonly Project[]
+  project: Project | undefined
   assets: readonly TeamSkillAsset[]
-  onNavigate: (view: ViewId) => void
+  remote: ClientRemote
+  onOpenProject: () => void
+  onOpenWorkspace: () => void
+  onSelectProject: () => void
+  onAuthorizationFailure: () => void
 }) {
-  const counts = new Map<TeamSkillAsset['assetType'], number>()
-  for (const asset of assets) counts.set(asset.assetType, (counts.get(asset.assetType) ?? 0) + 1)
+  const [workspaceState, setWorkspaceState] = useState<
+    | { readonly stage: 'loading' }
+    | { readonly stage: 'ready'; readonly workspaceStatus: string | null; readonly defaultAgent: string | null; readonly latestRun: string | null }
+    | { readonly stage: 'failed'; readonly message: string }
+  >({ stage: 'loading' })
+  const [reloadTick, setReloadTick] = useState(0)
+  const requestRef = useRef(0)
+  // Keep the callback out of the effect deps: the parent passes a fresh arrow
+  // each render, and the query must run once per project, not once per render.
+  const authorizationFailureRef = useRef(onAuthorizationFailure)
+  authorizationFailureRef.current = onAuthorizationFailure
+
+  useEffect(() => {
+    if (project === undefined) return
+    const requestId = ++requestRef.current
+    setWorkspaceState({ stage: 'loading' })
+    void (async () => {
+      const workspaces = await remote.cloudWorkspaces.workspaces(project.id)
+      if (requestId !== requestRef.current) return
+      if (!workspaces.ok) {
+        setWorkspaceState({ stage: 'failed', message: workspaces.error.message })
+        return
+      }
+      if (isSignedOut(workspaces.value)) {
+        authorizationFailureRef.current()
+        return
+      }
+      if (isHostFailure(workspaces.value)) {
+        setWorkspaceState({ stage: 'failed', message: hostFailureMessage(workspaces.value) })
+        return
+      }
+      const value = workspaces.value.value
+      const workspace = value[0]
+      let workspaceStatus: string | null = null
+      let latestRun: string | null = null
+      if (workspace !== undefined) {
+        workspaceStatus = WORKSPACE_STATUS_LABELS[workspace.status] ?? workspace.status
+        const runs = await remote.cloudWorkspaces.workspaceRuns(workspace.workspaceId)
+        if (requestId !== requestRef.current) return
+        if (runs.ok && runs.value.status === 'ready') {
+          const run = runs.value.value[0]
+          latestRun = run === undefined ? null : `${run.runId} · ${RUN_STATUS_LABELS[run.status] ?? run.status}`
+        }
+      }
+      const profiles = await remote.cloudWorkspaces.agentProfiles(project.id)
+      if (requestId !== requestRef.current) return
+      if (!profiles.ok) {
+        setWorkspaceState({ stage: 'failed', message: profiles.error.message })
+        return
+      }
+      if (isSignedOut(profiles.value)) {
+        authorizationFailureRef.current()
+        return
+      }
+      if (isHostFailure(profiles.value)) {
+        setWorkspaceState({ stage: 'failed', message: hostFailureMessage(profiles.value) })
+        return
+      }
+      const defaultProfile = profiles.value.value.find(item => item.default) ?? profiles.value.value[0]
+      setWorkspaceState({
+        stage: 'ready',
+        workspaceStatus,
+        defaultAgent: defaultProfile?.name ?? null,
+        latestRun,
+      })
+    })().catch((error: unknown) => {
+      if (requestId === requestRef.current) setWorkspaceState({ stage: 'failed', message: remoteFailureMessage(error) })
+    })
+  }, [project, remote, reloadTick])
+
+  const readiness = new Map<TeamSkillAsset['assetType'], number>()
+  for (const asset of assets) {
+    if (asset.assetType !== 'project') readiness.set(asset.assetType, (readiness.get(asset.assetType) ?? 0) + 1)
+  }
   return (
     <div className={css.page}>
-      <PageIntro eyebrow="资产总览" title="从权限范围内的资产开始协作" description="项目、Skill、知识库和记忆由服务端按账号权限返回；进入具体项目或安装项目级 Skill 时再选择项目。" />
-      <div className={css.metricGrid}>
-        <Metric label="可见项目" value={String(projects.length)} detail="服务端已授权" icon={<IconFolderOpenOutline16 size={16} />} />
-        <Metric label="团队 Skill" value={String(counts.get('skill') ?? 0)} detail="可用版本" icon={<IconSkillOutline16 size={16} />} />
-        <Metric label="知识库" value={String(counts.get('knowledge') ?? 0)} detail="当前账号可见" icon={<IconArchiveOutline20 size={16} />} />
-        <Metric label="记忆" value={String(counts.get('memory') ?? 0)} detail="当前账号可见" icon={<IconGoalOutline16 size={16} />} />
-      </div>
-      <section className={css.panel}>
-        <SectionHeading
-          title="权限内项目"
-          action={
-            <button
-              type="button"
-              className={css.outlineButton}
-              onClick={() => {
-                onNavigate('projects')
-              }}
-            >
-              <IconFolderOpenOutline16 size={15} />
-              查看项目
-            </button>
-          }
-        />
-        {projects.length === 0 ? (
-          <div className={css.empty}>
-            <IconFolderOpenOutline16 size={21} />
-            <h2>暂无可见项目</h2>
-            <p>当前账号没有被授予项目访问权限。</p>
-          </div>
+      <PageIntro eyebrow="总览" title="从权限范围内的资产开始协作" description="首屏只显示当前项目摘要；准备、工作与复盘入口按任务分组。" />
+      <section
+        className={css.panel}
+        role="region"
+        aria-label="当前项目概览"
+        data-state={project === undefined ? 'no-project' : workspaceState.stage === 'failed' ? 'service-error' : 'ready'}
+      >
+        {project === undefined ? (
+          <StatePanel
+            state="no-project"
+            title="尚未选择项目"
+            reason="选择一个项目后才能查看项目摘要并继续协作。"
+            action={
+              <button type="button" className={css.primaryButton} onClick={onSelectProject}>
+                选择项目
+              </button>
+            }
+          />
+        ) : workspaceState.stage === 'failed' ? (
+          <StatePanel
+            state="service-error"
+            title="服务暂时不可用"
+            reason={workspaceState.message}
+            action={
+              <button
+                type="button"
+                className={css.primaryButton}
+                onClick={() => {
+                  setReloadTick(tick => tick + 1)
+                }}
+              >
+                <IconRefreshOutline16 size={16} />
+                重新加载
+              </button>
+            }
+          />
         ) : (
-          <div className={css.projectCards}>
-            {projects.map(project => (
-              <div key={project.id} className={css.projectCard}>
-                <strong>{project.name}</strong>
-                <small>
-                  {project.organizationId} · {project.status}
-                </small>
-                <span>请使用左上角项目选择器切换</span>
+          <>
+            <div className={css.projectDetailHead}>
+              <div className={css.projectIcon}>
+                <IconFolderOpenOutline16 size={20} />
               </div>
-            ))}
-          </div>
-        )}
-      </section>
-      <section className={css.panel}>
-        <SectionHeading
-          title="其他资产"
-          action={
-            <div className={css.inlineActions}>
-              <button
-                type="button"
-                className={css.outlineButton}
-                onClick={() => {
-                  onNavigate('skills')
-                }}
-              >
-                <IconSkillOutline16 size={15} />
-                团队 Skill
+              <div>
+                <h2>{project.name}</h2>
+                <p>{project.organizationName}</p>
+              </div>
+              <span className={css.stateTag}>
+                <span className={css.statusLive} />
+                {projectStatusLabel(project.status)}
+              </span>
+            </div>
+            <dl className={css.projectFacts}>
+              <div>
+                <dt>Workspace 状态</dt>
+                <dd>
+                  {workspaceState.stage === 'loading'
+                    ? '读取中…'
+                    : (workspaceState.workspaceStatus ?? '未创建')}
+                </dd>
+              </div>
+              <div>
+                <dt>默认 Agent</dt>
+                <dd>{workspaceState.stage === 'loading' ? '读取中…' : (workspaceState.defaultAgent ?? '未配置')}</dd>
+              </div>
+              <div>
+                <dt>最近一次 Run</dt>
+                <dd>{workspaceState.stage === 'loading' ? '读取中…' : (workspaceState.latestRun ?? '暂无')}</dd>
+              </div>
+              <div>
+                <dt>资产准备度</dt>
+                <dd>
+                  Skill {readiness.get('skill') ?? 0} · 知识库 {readiness.get('knowledge') ?? 0} · 记忆 {readiness.get('memory') ?? 0}
+                </dd>
+              </div>
+            </dl>
+            <div className={css.overviewCards}>
+              <button type="button" className={css.overviewCard} onClick={onOpenProject}>
+                <strong>进入项目</strong>
+                <small>查看项目详情与授权资产</small>
               </button>
-              <button
-                type="button"
-                className={css.outlineButton}
-                onClick={() => {
-                  onNavigate('knowledge')
-                }}
-              >
-                <IconArchiveOutline20 size={15} />
-                知识库
-              </button>
-              <button
-                type="button"
-                className={css.outlineButton}
-                onClick={() => {
-                  onNavigate('memory')
-                }}
-              >
-                <IconGoalOutline16 size={15} />
-                记忆库
+              <button type="button" className={css.overviewCard} onClick={onOpenWorkspace}>
+                <strong>打开工作空间</strong>
+                <small>在云工作空间中继续工程任务</small>
               </button>
             </div>
-          }
-        />
-        {assets.length === 0 ? (
-          <div className={css.empty}>
-            <IconInspectOutline12 size={21} />
-            <h2>暂无可见资产</h2>
-            <p>服务端没有返回当前账号可见的资产。</p>
-          </div>
-        ) : (
-          <div className={css.assetList}>
-            {assets
-              .filter(asset => asset.assetType !== 'project')
-              .map(asset => (
-                <div key={`${asset.assetType}:${asset.assetId}`} className={css.assetRow}>
-                  <span>{asset.assetType}</span>
-                  <strong>{asset.name}</strong>
-                  <small>{asset.visibility}</small>
-                </div>
-              ))}
-          </div>
+          </>
         )}
       </section>
     </div>
   )
 }
 
-function GateState({ title, message, action }: { title: string; message: string; action?: ReactNode }) {
+function StatePanel({
+  state,
+  title,
+  reason,
+  impact,
+  action,
+  children,
+}: {
+  state: string
+  title: string
+  reason: string
+  impact?: string
+  action?: ReactNode
+  children?: ReactNode
+}) {
   return (
-    <section className={css.gateState} role="status">
-      <IconInspectOutline12 size={22} />
+    <section className={css.statePanel} data-state={state} role="status">
+      <IconInspectOutline12 size={20} />
       <h1>{title}</h1>
-      <p>{message}</p>
+      <p>{reason}</p>
+      {impact !== undefined && <p className={css.stateImpact}>{impact}</p>}
+      {children}
       {action}
     </section>
   )
@@ -1355,6 +1904,7 @@ function GateState({ title, message, action }: { title: string; message: string;
 function AccountDrawer({
   account,
   organizations,
+  access,
   selectedOrganizationId,
   onClose,
   onOrganizationChange,
@@ -1363,12 +1913,14 @@ function AccountDrawer({
 }: {
   account: AuthenticatedAccount
   organizations: readonly TeamSkillOrganization[]
+  access: TeamSkillAccessSummary | undefined
   selectedOrganizationId: string | undefined
   onClose: () => void
   onOrganizationChange: (organizationId: string) => void
   onRefresh: () => void
   onLogout: () => void
 }) {
+  const manageableProjects = (access?.projects ?? []).filter(item => access?.management.projectIds.includes(item.projectId))
   return (
     <div className={css.drawerBackdrop} role="presentation">
       <aside className={css.accountDrawer} role="dialog" aria-modal="true" aria-label="账号与访问范围">
@@ -1389,9 +1941,47 @@ function AccountDrawer({
           </div>
           <div>
             <dt>全局角色</dt>
-            <dd>{account.user.globalRole}</dd>
+            <dd>{roleLabel(account.user.globalRole)}</dd>
           </div>
         </dl>
+        <section aria-label="组织作用域" className={css.drawerScope}>
+          <h3>组织作用域</h3>
+          <ul className={css.scopeList}>
+            {account.memberships.map(item => (
+              <li key={item.organizationId}>
+                <strong>{item.organizationName}</strong>
+                <small>
+                  {item.status === 'active' ? '成员' : '已停用'}
+                  {access?.management.organizationIds.includes(item.organizationId) ? ' · 可管理' : ''}
+                </small>
+              </li>
+            ))}
+            {account.memberships.length === 0 && <li>服务未提供组织成员关系。</li>}
+          </ul>
+        </section>
+        <dl className={css.accountFacts}>
+          <div>
+            <dt>可管理组织</dt>
+            <dd>{access === undefined ? '服务未提供' : `${access.management.organizationIds.length} 个`}</dd>
+          </div>
+          <div>
+            <dt>可管理项目</dt>
+            <dd>{access === undefined ? '服务未提供' : `${access.management.projectIds.length} 个`}</dd>
+          </div>
+        </dl>
+        <section aria-label="项目作用域" className={css.drawerScope}>
+          <h3>项目作用域</h3>
+          <ul className={css.scopeList}>
+            {manageableProjects.map(item => (
+              <li key={item.projectId}>
+                <strong>{item.name}</strong>
+                <small>可管理 · {item.organizationName}</small>
+              </li>
+            ))}
+            {manageableProjects.length === 0 && <li>当前账号没有可管理项目；可见项目以顶栏项目选择器为准。</li>}
+          </ul>
+        </section>
+        <p className={css.drawerCleanupNote}>退出登录将清理当前账号上下文：原生会话绑定、知识库与记忆选择、采集项目绑定和待确认操作全部失效。</p>
         <label className={css.drawerField}>
           组织筛选
           <select
@@ -1411,11 +2001,11 @@ function AccountDrawer({
         </label>
         <div className={css.drawerActions}>
           <button type="button" className={css.outlineButton} onClick={onRefresh}>
-            <IconRefreshOutline16 size={15} />
+            <IconRefreshOutline16 size={16} />
             刷新访问范围
           </button>
           <button type="button" className={css.primaryButton} onClick={onLogout}>
-            <IconCloseOutline16 size={15} />
+            <IconCloseOutline16 size={16} />
             退出登录
           </button>
         </div>
@@ -1426,12 +2016,10 @@ function AccountDrawer({
 
 function ProjectsView({
   project,
-  projectId,
   projects,
   onProjectChange,
 }: {
   project: Project | undefined
-  projectId: string | undefined
   projects: readonly Project[]
   onProjectChange: (id: string) => void
 }) {
@@ -1470,30 +2058,14 @@ function ProjectsView({
     )
   return (
     <div className={css.page}>
-      <PageIntro eyebrow="项目" title={project.name} description="项目详情由服务端按当前账号权限返回；进入详情不会切换左上角的当前项目。" />
+      <PageIntro eyebrow="项目" title={project.name} description="项目详情由服务端按当前账号权限返回；切换项目请使用顶栏当前项目选择器。" />
       <div className={css.projectToolbar}>
-        <label className={css.selectBox}>
-          <span>查看项目</span>
-          <select
-            aria-label="查看项目"
-            value={projectId ?? ''}
-            onChange={(event) => {
-              onProjectChange(event.target.value)
-            }}
-          >
-            {projects.map(item => (
-              <option key={item.id} value={item.id}>
-                {item.name}
-              </option>
-            ))}
-          </select>
-        </label>
         <span className={css.toolbarMeta}>{project.organizationName}</span>
       </div>
       <section className={css.panel}>
         <div className={css.projectDetailHead}>
           <div className={css.projectIcon}>
-            <IconFolderOpenOutline16 size={19} />
+            <IconFolderOpenOutline16 size={20} />
           </div>
           <div>
             <h2>{project.name}</h2>
@@ -1532,7 +2104,7 @@ function ProjectsView({
           </div>
         </dl>
         <div className={css.empty}>
-          <IconInspectOutline12 size={21} />
+          <IconInspectOutline12 size={20} />
           <h2>项目级操作由后台管理</h2>
           <p>插件只提供项目选择和授权资产入口，不提供创建、编辑、成员或资产关联写入。</p>
         </div>
@@ -1545,7 +2117,9 @@ function KnowledgeView({
   projectId,
   knowledgeBases,
   selectedIds,
+  boundCount,
   onSelectionChange,
+  onClearSelection,
   search,
   preview,
   onSearch,
@@ -1554,13 +2128,17 @@ function KnowledgeView({
   projectId: string | undefined
   knowledgeBases: readonly TeamSkillKnowledgeBaseSummary[]
   selectedIds: Set<string>
+  /** 服务端确认的本轮绑定数量；列表选择只是待提交状态。 */
+  boundCount: number
   onSelectionChange: (value: Set<string>) => void
+  onClearSelection: () => void
   search: TeamSkillKnowledgeSearchResponse | undefined
   preview: TeamSkillKnowledgePreview | undefined
   onSearch: (query: string) => Promise<void>
   onPreview: (knowledgeBaseId: string, documentId: string) => Promise<void>
 }) {
   const [query, setQuery] = useState('')
+  const [previewOpen, setPreviewOpen] = useState(false)
   const toggle = (id: string): void => {
     const next = new Set(selectedIds)
     if (next.has(id)) next.delete(id)
@@ -1572,7 +2150,7 @@ function KnowledgeView({
       <PageIntro
         eyebrow="知识库"
         title="让规范在对话开始前就到位"
-        description={projectId === undefined ? '请先选择 active 项目。' : '只检索当前项目显式开启的知识库，检索状态和引用来源由服务端返回。'}
+        description={projectId === undefined ? '请先选择 active 项目。' : '选择只绑定当前 DSH 会话；切换会话或项目会清空本轮选择。'}
         action={
           <form
             className={css.searchBox}
@@ -1581,7 +2159,7 @@ function KnowledgeView({
               void onSearch(query.trim())
             }}
           >
-            <IconSearchOutline16 size={15} />
+            <IconSearchOutline16 size={16} />
             <input
               value={query}
               onChange={(event) => {
@@ -1589,39 +2167,58 @@ function KnowledgeView({
               }}
               placeholder="搜索知识库"
             />
-            <button type="submit" aria-label="检索" disabled={projectId === undefined || selectedIds.size === 0 || query.trim().length === 0}>
-              <IconSearchOutline16 size={14} />
+            <button type="submit" aria-label="检索" disabled={projectId === undefined || boundCount === 0 || query.trim().length === 0}>
+              <IconSearchOutline16 size={16} />
             </button>
           </form>
         }
       />
+      <div className={css.bindingSummary} role="status" data-state={boundCount === 0 ? 'empty' : 'ready'}>
+        <strong>本轮已启用 {boundCount} 个知识库</strong>
+        <span>绑定只对当前原生会话生效；列表勾选是待提交选择，服务端确认后才计入已启用。</span>
+        {selectedIds.size > 0 && (
+          <button type="button" className={css.outlineButton} onClick={onClearSelection}>
+            清除本轮选择
+          </button>
+        )}
+      </div>
       <div className={css.knowledgeLayout}>
         <section className={css.panel}>
           <div className={css.listHeader}>
             <span>项目知识库</span>
-            <span>{selectedIds.size} 个已开启</span>
+            <span>待提交选择 {selectedIds.size} 个</span>
           </div>
-          <div className={css.knowledgeList}>
-            {knowledgeBases.map(item => (
-              <label key={item.knowledgeBaseId} className={css.knowledgeRow}>
-                <input
-                  type="checkbox"
-                  checked={selectedIds.has(item.knowledgeBaseId)}
-                  onChange={() => {
-                    toggle(item.knowledgeBaseId)
-                  }}
-                />
-                <span className={css.knowledgeType}>{item.type}</span>
-                <span className={css.knowledgeCopy}>
-                  <strong>{item.name}</strong>
-                  <small>{item.description}</small>
-                  <em>
-                    {item.knowledgeBaseId} · r{item.revision}
-                  </em>
-                </span>
-                <span className={item.state === 'active' ? css.indexed : css.indexing}>{item.state}</span>
-              </label>
-            ))}
+          <div className={css.knowledgeList} data-knowledge-list="">
+            {/* 可搜索分组选择器（规格 §6）：按知识库类型分组，组内条目带描述与状态。 */}
+            {Array.from(new Set(knowledgeBases.map(item => item.type))).map((type) => {
+              const groupLabel: string = type === 'document' ? '文档' : type === 'faq' ? 'FAQ' : 'Wiki'
+              return (
+                <div key={type} role="group" aria-label={`${groupLabel}知识库`}>
+                  <div className={css.knowledgeGroupLabel}>{groupLabel}</div>
+                  {knowledgeBases
+                    .filter(item => item.type === type)
+                    .map(item => (
+                      <label key={item.knowledgeBaseId} className={css.knowledgeRow}>
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(item.knowledgeBaseId)}
+                          onChange={() => {
+                            toggle(item.knowledgeBaseId)
+                          }}
+                        />
+                        <span className={css.knowledgeCopy}>
+                          <strong>{item.name}</strong>
+                          <small>{item.description}</small>
+                          <em>
+                            {item.knowledgeBaseId} · r{item.revision}
+                          </em>
+                        </span>
+                        <span className={item.state === 'active' ? css.indexed : css.indexing}>{item.state}</span>
+                      </label>
+                    ))}
+                </div>
+              )
+            })}
           </div>
           {knowledgeBases.length === 0 && (
             <div className={css.empty}>
@@ -1630,13 +2227,26 @@ function KnowledgeView({
             </div>
           )}
         </section>
-        <aside className={css.knowledgeAside}>
+        <aside className={css.knowledgeAside} aria-label="知识库检索结果">
           <div className={css.knowledgeAsideMark}>
             <IconArchiveOutline20 size={20} />
           </div>
           <h2>检索结果</h2>
-          {search === undefined ? (
-            <p>选择一个或多个知识库并提交查询。</p>
+          {boundCount === 0 ? (
+            <>
+              <p>检索前需要至少一个已启用知识库。</p>
+              <button
+                type="button"
+                className={css.primaryButton}
+                onClick={() => {
+                  document.querySelector<HTMLInputElement>('[data-knowledge-list] input[type="checkbox"]')?.focus()
+                }}
+              >
+                选择知识库
+              </button>
+            </>
+          ) : search === undefined ? (
+            <p>已启用 {boundCount} 个知识库；提交查询后在这里查看命中结果。</p>
           ) : (
             <>
               <p>
@@ -1662,25 +2272,67 @@ function KnowledgeView({
                       <small>{item.snippet}</small>
                       <em>{item.sourceUrl}</em>
                     </span>
-                    <button type="button" className={css.outlineButton} onClick={() => void onPreview(item.knowledgeBaseId, item.knowledgeId)}>
+                    <button
+                      type="button"
+                      className={css.outlineButton}
+                      onClick={() => {
+                        setPreviewOpen(true)
+                        void onPreview(item.knowledgeBaseId, item.knowledgeId)
+                      }}
+                    >
                       预览
                     </button>
                     <span className={css.indexed}>{item.score.toFixed(2)}</span>
                   </div>
                 ))}
               </div>
-              {preview !== undefined && (
-                <div className={css.callout}>
-                  <strong>{preview.title}</strong>
-                  <a href={preview.previewUrl} target="_blank" rel="noreferrer">
-                    打开受权预览
-                  </a>
-                </div>
-              )}
             </>
           )}
         </aside>
       </div>
+      {previewOpen && (
+        <div className={css.drawerBackdrop} role="presentation">
+          <section className={css.accountDrawer} role="dialog" aria-modal="true" aria-label="知识预览">
+            <div className={css.drawerHeader}>
+              <div>
+                <span className={css.eyebrow}>知识预览</span>
+                <h2>{preview?.title ?? '正在读取预览'}</h2>
+              </div>
+              <button
+                type="button"
+                className={css.closeButton}
+                aria-label="关闭预览"
+                onClick={() => {
+                  setPreviewOpen(false)
+                }}
+              >
+                <IconCloseOutline16 size={16} />
+              </button>
+            </div>
+            {preview === undefined ? (
+              <p className={css.drawerEmail}>预览内容由服务端授权生成，正在读取…</p>
+            ) : (
+              <p className={css.drawerEmail}>预览地址由服务端短期授权；关闭抽屉不会清空检索结果。</p>
+            )}
+            {preview !== undefined && (
+              <div className={css.drawerActions}>
+                <a className={css.outlineButton} href={preview.previewUrl} target="_blank" rel="noreferrer">
+                  打开受权预览
+                </a>
+                <button
+                  type="button"
+                  className={css.primaryButton}
+                  onClick={() => {
+                    setPreviewOpen(false)
+                  }}
+                >
+                  关闭
+                </button>
+              </div>
+            )}
+          </section>
+        </div>
+      )}
     </div>
   )
 }
@@ -1708,7 +2360,7 @@ function MemoryView({
   onSearch: (keyword: string) => void
   onLoadMore: () => void
   onRefresh: () => void
-  onConfirm: (message: string) => Promise<boolean>
+  onConfirm: (message: string, confirmLabel?: string) => Promise<boolean>
 }) {
   const [selectedId, setSelectedId] = useState<string | undefined>()
   const [selectedRecord, setSelectedRecord] = useState<TeamSkillMemory | undefined>()
@@ -1717,6 +2369,7 @@ function MemoryView({
   const [busy, setBusy] = useState(false)
   const [actionMessage, setActionMessage] = useState<string | undefined>()
   const [query, setQuery] = useState(keyword ?? '')
+  const [statusFilter, setStatusFilter] = useState<'all' | 'ACTIVE'>('all')
   const detailRequest = useRef(0)
   const mutationGeneration = useRef(0)
   const selectedRecordRef = useRef<TeamSkillMemory | undefined>()
@@ -1784,9 +2437,14 @@ function MemoryView({
       setBusy(false)
     }
   }
-  const remove = async (): Promise<void> => {
-    const current = selectedRecordRef.current ?? selected
-    if (current === undefined || busy || !(await onConfirm('删除后该记忆将立即不再参与召回，确认删除？'))) return
+  const remove = async (record?: TeamSkillMemory): Promise<void> => {
+    const current = record ?? selectedRecordRef.current ?? selected
+    if (current === undefined || busy) return
+    const confirmed = await onConfirm(
+      `删除后该记忆将立即不再参与召回。受影响项目：${current.projectId}；服务端将提交异步清理任务，删除结果以任务状态为准。`,
+      '确认删除',
+    )
+    if (!confirmed) return
     const generation = mutationGeneration.current
     const requestedProjectId = projectId
     setBusy(true)
@@ -1825,7 +2483,7 @@ function MemoryView({
                 onSearch(query.trim())
               }}
             >
-              <IconSearchOutline16 size={14} />
+              <IconSearchOutline16 size={16} />
               <input
                 aria-label="搜索记忆"
                 type="search"
@@ -1836,17 +2494,30 @@ function MemoryView({
                 placeholder="搜索当前项目记忆"
               />
               <button type="submit" aria-label="搜索记忆">
-                <IconSearchOutline16 size={14} />
+                <IconSearchOutline16 size={16} />
               </button>
             </form>
+            <label className={css.selectBox}>
+              <span>状态</span>
+              <select
+                aria-label="记忆状态筛选"
+                value={statusFilter}
+                onChange={(event) => {
+                  setStatusFilter(event.target.value as typeof statusFilter)
+                }}
+              >
+                <option value="all">全部</option>
+                <option value="ACTIVE">启用中</option>
+              </select>
+            </label>
             <button type="button" className={css.outlineButton} onClick={onRefresh} disabled={loading}>
-              <IconRefreshOutline16 size={15} />
+              <IconRefreshOutline16 size={16} />
               刷新
             </button>
           </div>
         }
       />
-      {actionMessage !== undefined && (
+      {actionMessage !== undefined && !editing && (
         <div className={css.surfaceNotice} role="status">
           {actionMessage}
         </div>
@@ -1862,7 +2533,7 @@ function MemoryView({
           <h2>记忆服务不可用</h2>
           <p>{error}</p>
           <button type="button" className={css.primaryButton} onClick={onRefresh}>
-            <IconRefreshOutline16 size={15} />
+            <IconRefreshOutline16 size={16} />
             重试
           </button>
         </div>
@@ -1875,27 +2546,60 @@ function MemoryView({
               <span>{loading ? '读取中…' : `${page?.totalEstimate ?? memories.length} 条`}</span>
             </div>
             <div className={css.memoryList}>
-              {memories.map(memory => (
-                <button key={memory.memoryId} type="button" className={selectedId === memory.memoryId ? `${css.memoryRow} ${css.memoryRowActive}` : css.memoryRow} onClick={() => void open(memory)}>
-                  <div className={css.memoryMark}>
-                    <IconGoalOutline16 size={16} />
-                  </div>
-                  <div className={css.memoryCopy}>
-                    <div>
-                      <h2>
-                        {memory.content.slice(0, 60)}
-                        {memory.content.length > 60 ? '…' : ''}
-                      </h2>
-                      <span className={css.scopeTag}>项目记忆</span>
+              {memories
+                .filter(memory => statusFilter === 'all' || memory.status === statusFilter)
+                .map(memory => (
+                  <div key={memory.memoryId} className={selectedId === memory.memoryId ? `${css.memoryRow} ${css.memoryRowActive}` : css.memoryRow} data-memory-id={memory.memoryId}>
+                    <div className={css.memoryMark}>
+                      <IconGoalOutline16 size={16} />
                     </div>
-                    <p>{memory.content}</p>
-                    <small>
-                      r{memory.revision} · 更新于 {formatMemoryDate(memory.updatedAt)}
-                    </small>
+                    <div className={css.memoryCopy}>
+                      <div>
+                        <h2>
+                          {memory.content.slice(0, 60)}
+                          {memory.content.length > 60 ? '…' : ''}
+                        </h2>
+                        <span className={css.scopeTag}>项目记忆</span>
+                      </div>
+                      <p>{memory.content}</p>
+                      <small>
+                        r{memory.revision} · 更新于 {formatMemoryDate(memory.updatedAt)}
+                      </small>
+                    </div>
+                    <span className={css.confidenceHigh}>L1</span>
+                    <div className={css.memoryRowActions}>
+                      <button
+                        type="button"
+                        className={css.outlineButton}
+                        aria-label={`查看记忆 ${memory.memoryId}`}
+                        onClick={() => void open(memory)}
+                      >
+                        查看
+                      </button>
+                      <button
+                        type="button"
+                        className={css.outlineButton}
+                        aria-label={`编辑记忆 ${memory.memoryId}`}
+                        onClick={() => {
+                          void open(memory).then(() => {
+                            setEditing(true)
+                          })
+                        }}
+                      >
+                        编辑
+                      </button>
+                      <button
+                        type="button"
+                        className={css.dangerButton}
+                        aria-label={`删除记忆 ${memory.memoryId}`}
+                        disabled={busy}
+                        onClick={() => void remove(memory)}
+                      >
+                        删除
+                      </button>
+                    </div>
                   </div>
-                  <span className={css.confidenceHigh}>L1</span>
-                </button>
-              ))}
+                ))}
             </div>
             {!loading && memories.length === 0 && (
               <div className={css.empty}>
@@ -1905,7 +2609,7 @@ function MemoryView({
             )}
             {page?.nextCursor !== null && page?.nextCursor !== undefined && (
               <button type="button" className={css.memoryFooter} onClick={onLoadMore} disabled={loading}>
-                <IconQueueOutline14 size={14} />
+                <IconQueueOutline14 size={16} />
                 {loading ? '读取中…' : '加载更多记忆'}
               </button>
             )}
@@ -1946,23 +2650,38 @@ function MemoryView({
                     <dd>{selected.projectId}</dd>
                   </div>
                   <div>
-                    <dt>捕获者</dt>
-                    <dd>{selected.capturedByUserId}</dd>
+                    <dt>来源</dt>
+                    <dd>Agent 回合捕获</dd>
                   </div>
                   <div>
                     <dt>修订</dt>
                     <dd>r{selected.revision}</dd>
                   </div>
                   <div>
+                    <dt>更新时间</dt>
+                    <dd>{formatMemoryDate(selected.updatedAt)}</dd>
+                  </div>
+                  <div>
+                    <dt>捕获者</dt>
+                    <dd>{selected.capturedByUserId}</dd>
+                  </div>
+                  <div>
                     <dt>召回</dt>
                     <dd>{selected.recallCount}</dd>
                   </div>
                 </dl>
-                <div className={css.reviewActions}>
-                  {editing ? (
-                    <>
+                {editing ? (
+                  <div
+                    className={css.saveBar}
+                    role="status"
+                    data-state={content !== selected.content ? 'dirty' : 'clean'}
+                  >
+                    <span className={css.saveBarRevision}>修订 r{selected.revision}</span>
+                    <span>{content !== selected.content ? '有未保存修改' : '无修改'}</span>
+                    {actionMessage !== undefined && <span className={css.saveBarResult}>{actionMessage}</span>}
+                    <div className={css.reviewActions}>
                       <button type="button" className={css.primaryButton} disabled={busy || content.trim().length === 0} onClick={() => void save()}>
-                        <IconSettingsOutline14 size={14} />
+                        <IconSettingsOutline14 size={16} />
                         保存记忆
                       </button>
                       <button
@@ -1971,28 +2690,29 @@ function MemoryView({
                         onClick={() => {
                           setEditing(false)
                           setContent(selected.content)
+                          setActionMessage(undefined)
                         }}
                       >
                         取消
                       </button>
-                    </>
-                  ) : (
-                    <>
-                      <button
-                        type="button"
-                        className={css.outlineButton}
-                        onClick={() => {
-                          setEditing(true)
-                        }}
-                      >
-                        编辑记忆
-                      </button>
-                      <button type="button" className={css.dangerButton} onClick={() => void remove()} disabled={busy}>
-                        删除记忆
-                      </button>
-                    </>
-                  )}
-                </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className={css.reviewActions}>
+                    <button
+                      type="button"
+                      className={css.outlineButton}
+                      onClick={() => {
+                        setEditing(true)
+                      }}
+                    >
+                      编辑记忆
+                    </button>
+                    <button type="button" className={css.dangerButton} onClick={() => void remove()} disabled={busy}>
+                      删除记忆
+                    </button>
+                  </div>
+                )}
               </>
             )}
           </aside>
@@ -2024,6 +2744,7 @@ function CollectorView({
   loading,
   error,
   busy,
+  refreshedAt,
   onRefresh,
   onAction,
 }: {
@@ -2032,6 +2753,7 @@ function CollectorView({
   loading: boolean
   error: string | undefined
   busy: boolean
+  refreshedAt: string | undefined
   onRefresh: () => void
   onAction: (action: 'pause' | 'resume' | 'flush' | 'clear') => void
 }) {
@@ -2041,62 +2763,8 @@ function CollectorView({
     <div className={css.page}>
       <PageIntro
         eyebrow="数据采集"
-        title="当前项目的采集管道状态"
-        description="插件仅上报白名单结构化事件；提示词、回复、命令与文件路径不进入上报。服务端负责校验、去重和聚合。"
-        action={
-          <span className={css.collectorActions}>
-            <button type="button" className={css.outlineButton} disabled={busy || loading} onClick={onRefresh}>
-              <IconRefreshOutline16 size={15} />
-              刷新状态
-            </button>
-            {status !== undefined && status.mode === 'paused' ? (
-              <button
-                type="button"
-                className={css.outlineButton}
-                disabled={busy || loading}
-                onClick={() => {
-                  onAction('resume')
-                }}
-              >
-                <IconPlayOutline16 size={15} />
-                恢复采集
-              </button>
-            ) : (
-              <button
-                type="button"
-                className={css.outlineButton}
-                disabled={busy || loading}
-                onClick={() => {
-                  onAction('pause')
-                }}
-              >
-                <IconPauseOutline16 size={15} />
-                暂停采集
-              </button>
-            )}
-            <button
-              type="button"
-              className={css.outlineButton}
-              disabled={busy || loading}
-              onClick={() => {
-                onAction('flush')
-              }}
-            >
-              <IconQueueOutline14 size={15} />
-              立即发送
-            </button>
-            <button
-              type="button"
-              className={css.outlineButton}
-              disabled={busy || loading}
-              onClick={() => {
-                onAction('clear')
-              }}
-            >
-              清空未上报数据
-            </button>
-          </span>
-        }
+        title="AI Coding 可观测"
+        description="采集设置仅上报白名单结构化事件；提示词、回复、命令与文件路径不进入上报。服务端负责校验、去重和聚合。"
       />
       {error !== undefined && (
         <div className={css.formError} role="alert">
@@ -2116,6 +2784,90 @@ function CollectorView({
       {snapshot === undefined && (loading ? <div className={css.panel}>正在读取采集状态…</div> : null)}
       {status !== undefined && (
         <>
+          <section className={css.panel} role="region" aria-label="采集状态摘要">
+            <div className={css.eventList}>
+              <div className={css.eventRow}>
+                <span>连接状态</span>
+                <strong>{modeLabel}</strong>
+                <p>
+                  授权状态：
+                  {status.authorizationState === 'authorized' ? '已授权' : status.authorizationState === 'revoked' ? '已撤销' : '未知'}
+                  {status.projectId === null ? ' · 未绑定项目' : ` · ${status.projectId}`}
+                </p>
+                <em>{status.mode === 'paused' ? '已暂停' : status.mode === 'active' ? '采集中' : '停发'}</em>
+              </div>
+              <div className={css.eventRow}>
+                <span>队列积压</span>
+                <strong>{status.queueEventCount} 条</strong>
+                <p>占用 {formatQueueBytes(status.queueByteCount)}；数据缺口 {status.gapCount} 条。</p>
+                <em>{status.gapCount > 0 ? '存在缺口' : '无缺口'}</em>
+              </div>
+              <div className={css.eventRow}>
+                <span>最近失败</span>
+                <strong>{status.lastFailure === null ? '无' : `${status.lastFailure.stage} / ${status.lastFailure.code}`}</strong>
+                <p>{status.lastFailure === null ? '管道未记录失败' : `${new Date(status.lastFailure.at).toLocaleString()} · ${status.lastFailure.summary}`}</p>
+                <em>{status.lastFailure === null ? '健康' : '已记录'}</em>
+              </div>
+              <div className={css.eventRow}>
+                <span>最后刷新</span>
+                <strong>{refreshedAt === undefined ? '尚未刷新' : new Date(refreshedAt).toLocaleTimeString()}</strong>
+                <p>{refreshedAt === undefined ? '进入页面后自动读取' : '页面每 5 秒自动刷新'}</p>
+                <em>{refreshedAt === undefined ? '等待' : '自动'}</em>
+              </div>
+            </div>
+          </section>
+          <div role="group" aria-label="采集操作" className={css.collectorActions}>
+            <button type="button" className={css.outlineButton} disabled={busy || loading} onClick={onRefresh}>
+              <IconRefreshOutline16 size={16} />
+              刷新状态
+            </button>
+            {status.mode === 'paused' ? (
+              <button
+                type="button"
+                className={css.outlineButton}
+                disabled={busy || loading}
+                onClick={() => {
+                  onAction('resume')
+                }}
+              >
+                <IconPlayOutline16 size={16} />
+                恢复采集
+              </button>
+            ) : (
+              <button
+                type="button"
+                className={css.outlineButton}
+                disabled={busy || loading}
+                onClick={() => {
+                  onAction('pause')
+                }}
+              >
+                <IconPauseOutline16 size={16} />
+                暂停采集
+              </button>
+            )}
+            <button
+              type="button"
+              className={css.outlineButton}
+              disabled={busy || loading}
+              onClick={() => {
+                onAction('flush')
+              }}
+            >
+              <IconQueueOutline14 size={16} />
+              立即发送
+            </button>
+            <button
+              type="button"
+              className={css.outlineButton}
+              disabled={busy || loading}
+              onClick={() => {
+                onAction('clear')
+              }}
+            >
+              清空未上报数据
+            </button>
+          </div>
           <div className={css.metricGrid}>
             <Metric label="采集模式" value={modeLabel} detail={projectId === undefined ? '请先选择 active 项目' : `当前项目 ${projectId}`} icon={<IconDataOutline16 size={16} />} />
             <Metric label="队列事件" value={String(status.queueEventCount)} detail={`占用 ${formatQueueBytes(status.queueByteCount)}`} icon={<IconQueueOutline14 size={16} />} />
@@ -2135,12 +2887,6 @@ function CollectorView({
                 <em>{status.projectId === null ? '等待选择' : '已绑定'}</em>
               </div>
               <div className={css.eventRow}>
-                <span>最近失败</span>
-                <strong>{status.lastFailure === null ? '无' : `${status.lastFailure.stage} / ${status.lastFailure.code}`}</strong>
-                <p>{status.lastFailure === null ? '管道未记录失败' : `${new Date(status.lastFailure.at).toLocaleString()} · ${status.lastFailure.summary}`}</p>
-                <em>{status.lastFailure === null ? '健康' : '已记录'}</em>
-              </div>
-              <div className={css.eventRow}>
                 <span>本地存储</span>
                 <strong>{status.storageError === null ? '正常' : '异常'}</strong>
                 <p>{status.storageError === null ? 'telemetry 队列可读写' : status.storageError}</p>
@@ -2154,135 +2900,6 @@ function CollectorView({
           </div>
         </>
       )}
-    </div>
-  )
-}
-
-function AgentConfigView({
-  agent,
-  agents,
-  onAgentSelect,
-}: {
-  agent: AgentConfig
-  agents: readonly AgentConfig[]
-  onAgentSelect: (agentId: string) => void
-}) {
-  return (
-    <div className={css.page}>
-      <PageIntro
-        eyebrow="Agent 配置"
-        title="管理云平台里的 Coding Agent"
-        description="查看不同 Agent 的模型、推理和执行参数。当前仅展示本地示例配置，未连接云端配置服务。"
-        action={
-          <span className={css.demoConfigTag}>
-            <span className={css.statusWarn} />
-            仅本地演示
-          </span>
-        }
-      />
-      <div className={css.agentConfigLayout}>
-        <section className={css.panel}>
-          <SectionHeading title="Agent 列表" action={<span className={css.mutedLabel}>{agents.length} 个配置</span>} />
-          <div className={css.agentList} role="list" aria-label="Coding Agent 列表">
-            {agents.map((item) => {
-              const active = item.id === agent.id
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  className={active ? `${css.agentListItem} ${css.agentListItemActive}` : css.agentListItem}
-                  aria-pressed={active}
-                  onClick={() => {
-                    onAgentSelect(item.id)
-                  }}
-                >
-                  <span className={css.agentListIcon}>
-                    <IconAgentPresetOutline16 size={17} />
-                  </span>
-                  <span className={css.agentListCopy}>
-                    <strong>{item.name}</strong>
-                    <small>{item.description}</small>
-                  </span>
-                  <span className={item.status === '运行中' ? css.agentRunning : css.agentPaused}>
-                    <span className={item.status === '运行中' ? css.statusLive : css.statusWarn} />
-                    {item.status}
-                  </span>
-                </button>
-              )
-            })}
-          </div>
-        </section>
-
-        <section className={`${css.panel} ${css.agentDetail}`}>
-          <div className={css.agentDetailHeader}>
-            <div className={css.agentDetailIdentity}>
-              <span className={css.agentDetailIcon}>
-                <IconAgentPresetOutline16 size={20} />
-              </span>
-              <div>
-                <span className={css.eyebrow}>Coding Agent</span>
-                <h2>{agent.name}</h2>
-                <p>{agent.description}</p>
-              </div>
-            </div>
-            <span className={agent.status === '运行中' ? css.agentRunning : css.agentPaused}>
-              <span className={agent.status === '运行中' ? css.statusLive : css.statusWarn} />
-              {agent.status}
-            </span>
-          </div>
-
-          <div className={css.agentFieldGrid}>
-            <AgentField label="默认模型" value={agent.model} />
-            <AgentField label="推理等级" value={agent.reasoning} />
-            <AgentField label="访问模式" value={agent.accessMode} />
-            <AgentField label="并发任务数" value={`${agent.concurrency} 个`} />
-            <AgentField label="单次 Token 预算" value={agent.tokenBudget} />
-            <AgentField label="执行超时" value={agent.timeout} />
-          </div>
-
-          <div className={css.agentSection}>
-            <SectionHeading title="可用 Team Skill" action={<span className={css.mutedLabel}>{agent.skills.length} 个已绑定</span>} />
-            <div className={css.agentSkillList}>
-              {agent.skills.map(skill => (
-                <span key={skill} className={css.agentSkillTag}>
-                  <IconSkillOutline16 size={14} />
-                  {skill}
-                </span>
-              ))}
-            </div>
-          </div>
-
-          <div className={css.agentSection}>
-            <SectionHeading title="上下文策略" />
-            <div className={css.agentToggleRow}>
-              <div>
-                <strong>自动注入项目上下文</strong>
-                <small>运行任务时带入当前项目、分支和授权资产摘要。</small>
-              </div>
-              <span className={agent.autoContext ? `${css.toggle} ${css.toggleOn}` : css.toggle} aria-label={agent.autoContext ? '已开启' : '已关闭'}>
-                <i />
-              </span>
-            </div>
-          </div>
-
-          <div className={css.agentConfigFooter}>
-            <span>最后更新于 {agent.updated}</span>
-            <button type="button" className={css.outlineButton} disabled title="演示版本未连接云端配置服务">
-              <IconSettingsOutline14 size={14} />
-              保存配置
-            </button>
-          </div>
-        </section>
-      </div>
-    </div>
-  )
-}
-
-function AgentField({ label, value }: { label: string; value: string }) {
-  return (
-    <div className={css.agentField}>
-      <span>{label}</span>
-      <strong>{value}</strong>
     </div>
   )
 }
@@ -2404,13 +3021,7 @@ function groupProjects(projects: readonly TeamSkillProject[]): readonly {
   return [...groups.values()]
 }
 
-function isHostFailure(value: unknown): value is
-  | { readonly status: 'not-ready'; readonly missing: readonly string[] }
-  | {
-    readonly status: 'failed'
-    readonly code: string
-    readonly message: string
-  } {
+function isHostFailure(value: unknown): value is HostFailure {
   if (typeof value !== 'object' || value === null || !('status' in value)) return false
   const status = value.status
   return status === 'not-ready' || status === 'failed'
@@ -2440,15 +3051,7 @@ function memoryMutationValue(result: MemoryMutationResult, setError: (message: s
   return result.value
 }
 
-function hostFailureMessage(
-  value:
-    | { readonly status: 'not-ready'; readonly missing: readonly string[] }
-    | {
-      readonly status: 'failed'
-      readonly code: string
-      readonly message: string
-    },
-): string {
+function hostFailureMessage(value: HostFailure): string {
   return value.status === 'not-ready' ? `服务端未就绪：${value.missing.join('、')}` : value.message
 }
 

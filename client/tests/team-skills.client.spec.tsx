@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { ClientRemote } from '@deepseek-ai/dsh-api-remotes/client'
 import type { WorkspaceListState } from '@deepseek-ai/dsh-client-runtime/client'
 import type { WorkspaceId } from '@deepseek-ai/dsh-api-remotes/client'
@@ -227,5 +227,128 @@ describe('TeamSkillsView', () => {
 
     expect(await screen.findByRole('heading', { name: '无法读取本地安装状态' })).toBeTruthy()
     expect(refreshAuthorization).toHaveBeenCalledOnce()
+  })
+})
+
+describe('UX-03 Skill 使用路径', () => {
+  const installation = {
+    localInstallationId: 'local-1',
+    skillId: 'skill-review',
+    projectId: 'project-alpha',
+    scope: 'project' as const,
+    workspaceId: 'ws-1',
+    runtimeName: 'code-review',
+    version: '2.4.0',
+    artifactSha256: 'abc123',
+    state: 'normal' as const,
+    installedAt: '2026-08-29T08:10:00Z',
+  }
+
+  function mountView(
+    installations: readonly unknown[] = [],
+    install: (request: unknown) => Promise<unknown> = vi.fn(),
+    uninstall: (request: unknown) => Promise<unknown> = vi.fn(),
+  ) {
+    return render(
+      <TeamSkillsView
+        remote={remoteFor(async () => ({ ok: true, value: catalog }), async () => ({ ok: true, value: installations }), install, uninstall)}
+        useWorkspaces={withWorkspace}
+        environment={environment}
+        projectId="project-alpha"
+        projects={[]}
+      />,
+    )
+  }
+
+  it('renders one merged view with fixed toolbar order and no discover/installed tabs', async () => {
+    mountView()
+    await screen.findByRole('heading', { name: '代码评审' })
+    expect(screen.queryByRole('tab')).toBeNull()
+    expect(screen.getByText(/项目作用域/)).toBeTruthy()
+    const search = screen.getByPlaceholderText('搜索 Skill')
+    const filter = screen.getByRole('combobox', { name: 'Skill 状态筛选' })
+    const refresh = screen.getByRole('button', { name: '刷新' })
+    expect(search.compareDocumentPosition(filter) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(filter.compareDocumentPosition(refresh) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('filters rows by install state from the toolbar select', async () => {
+    mountView()
+    await screen.findByRole('heading', { name: '代码评审' })
+    fireEvent.change(screen.getByRole('combobox', { name: 'Skill 状态筛选' }), { target: { value: 'installed' } })
+    expect(screen.getByText('没有匹配的已发布 Skill')).toBeTruthy()
+    fireEvent.change(screen.getByRole('combobox', { name: 'Skill 状态筛选' }), { target: { value: 'available' } })
+    expect(screen.getByRole('heading', { name: '代码评审' })).toBeTruthy()
+  })
+
+  it('confirms uninstall with an explicit verb and reports the server result', async () => {
+    const uninstallCall = vi.fn(async () => ({ ok: true, value: { installation: { ...installation, state: 'uninstalled' as const } } }))
+    mountView([installation], vi.fn(), uninstallCall)
+    await screen.findByRole('heading', { name: '代码评审' })
+    fireEvent.click(screen.getByRole('button', { name: '卸载' }))
+    const dialog = screen.getByRole('dialog', { name: /卸载/ })
+    fireEvent.click(within(dialog).getByRole('button', { name: '确认卸载' }))
+    await waitFor(() => {
+      expect(uninstallCall).toHaveBeenCalledWith({ localInstallationId: 'local-1' })
+    })
+    expect(await screen.findByText('已从 DSH 移除该 Skill')).toBeTruthy()
+  })
+
+  it('shows unavailable reason on quarantined rows without an install action', async () => {
+    mountView([{ ...installation, version: '2.3.0', state: 'withdrawn' as const }])
+    await screen.findByRole('heading', { name: '代码评审' })
+    expect(screen.getAllByText('已隔离').length).toBeGreaterThan(0)
+    expect(screen.getByText(/版本已下线/)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '安装 Skill' })).toBeNull()
+  })
+
+  it('offers 查看 for details and 更新 for an outdated installation', async () => {
+    mountView([{ ...installation, version: '2.3.0' }])
+    await screen.findByRole('heading', { name: '代码评审' })
+    fireEvent.click(screen.getByRole('button', { name: '查看代码评审' }))
+    const detail = screen.getByRole('dialog', { name: /代码评审/ })
+    expect(within(detail).getByText(/v2\.4\.0/)).toBeTruthy()
+    expect(within(detail).getByText(/2\.3\.0/)).toBeTruthy()
+    fireEvent.click(within(detail).getByRole('button', { name: '关闭详情' }))
+    fireEvent.click(screen.getByRole('button', { name: '更新' }))
+    expect(screen.getByRole('dialog', { name: '安装代码评审' })).toBeTruthy()
+  })
+})
+
+
+describe('UX-03 二次核对', () => {
+  it('prefers the project-scope installation when both project and global copies exist', async () => {
+    const projectInstall = {
+      localInstallationId: 'local-project',
+      skillId: 'skill-review',
+      projectId: 'project-alpha',
+      scope: 'project' as const,
+      workspaceId: 'ws-1',
+      runtimeName: 'code-review',
+      version: '2.4.0',
+      artifactSha256: 'abc',
+      state: 'normal' as const,
+      installedAt: '2026-08-29T08:10:00Z',
+    }
+    const globalInstall = { ...projectInstall, localInstallationId: 'local-global', scope: 'global' as const, projectId: undefined }
+    render(
+      <TeamSkillsView
+        remote={remoteFor(
+          async () => ({ ok: true, value: catalog }),
+          async () => ({ ok: true, value: [globalInstall, projectInstall] }),
+          vi.fn(),
+        )}
+        useWorkspaces={withWorkspace}
+        environment={environment}
+        projectId="project-alpha"
+        projects={[]}
+      />,
+    )
+    await screen.findByRole('heading', { name: '代码评审' })
+    expect(screen.getByText('当前项目已安装')).toBeTruthy()
+    expect(screen.queryByText('全局已安装')).toBeNull()
+    // 卸载的是行内展示的那一份（项目作用域）
+    fireEvent.click(screen.getByRole('button', { name: '卸载' }))
+    expect(screen.getByRole('dialog', { name: /卸载/ })).toBeTruthy()
   })
 })

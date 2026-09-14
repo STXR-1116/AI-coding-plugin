@@ -270,21 +270,49 @@ async function createSiblingTemporaryDirectory(targetDirectory: string): Promise
   return candidate
 }
 
-/** Replace a target directory while restoring its prior copy when the final rename fails. */
+/**
+ * Replace a target directory while restoring its prior copy when the final rename fails.
+ *
+ * Replaces are serialized per target: two concurrent installs of the same
+ * skill would otherwise interleave between the backup rename and the swap, and
+ * the loser's `.replacing-` backup was left on disk forever. A failed restore
+ * also drops the backup rather than orphaning it — the target holds the other
+ * writer's valid copy at that point.
+ */
 async function replaceDirectory(temporaryDirectory: string, targetDirectory: string): Promise<void> {
-  if (!await pathExists(targetDirectory)) {
-    await rename(temporaryDirectory, targetDirectory)
-    return
-  }
-  const backupDirectory = `${targetDirectory}.replacing-${randomBytes(8).toString('hex')}`
-  await rename(targetDirectory, backupDirectory)
-  try {
-    await rename(temporaryDirectory, targetDirectory)
-  } catch (error) {
-    await rename(backupDirectory, targetDirectory)
-    throw error
-  }
-  await rm(backupDirectory, { recursive: true, force: true })
+  return queueReplace(targetDirectory, async () => {
+    if (!await pathExists(targetDirectory)) {
+      await rename(temporaryDirectory, targetDirectory)
+      return
+    }
+    const backupDirectory = `${targetDirectory}.replacing-${randomBytes(8).toString('hex')}`
+    await rename(targetDirectory, backupDirectory)
+    try {
+      await rename(temporaryDirectory, targetDirectory)
+    } catch (error) {
+      try {
+        await rename(backupDirectory, targetDirectory)
+      } catch {
+        // The target was re-created by another writer while we held the backup:
+        // its copy is the live one, so remove ours instead of leaving a
+        // `.replacing-` orphan behind.
+        await rm(backupDirectory, { recursive: true, force: true })
+      }
+      throw error
+    }
+    await rm(backupDirectory, { recursive: true, force: true })
+  })
+}
+
+/** Per-target replace queues: each entry chains onto the previous replace. */
+const replaceChains = new Map<string, Promise<unknown>>()
+
+/** Run one replace after every queued replace for the same target has settled. */
+function queueReplace<T>(targetDirectory: string, task: () => Promise<T>): Promise<T> {
+  const previous = replaceChains.get(targetDirectory) ?? Promise.resolve()
+  const next = previous.then(task, task)
+  replaceChains.set(targetDirectory, next.then(() => undefined, () => undefined))
+  return next
 }
 
 /** Compare current on-disk contents to the exact installation record. */
